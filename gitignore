@@ -1,0 +1,14 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Generated files
+progress.db
+audio_files/
+deck_new.apkg
+deck_full.apkg
+
+# Sensitive — never commit your real API keys
+# Make sure config.py only has placeholder values before pushing

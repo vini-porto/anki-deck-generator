@@ -1,0 +1,4 @@
+genanki
+gTTS
+wordfreq
+requests
