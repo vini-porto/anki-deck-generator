@@ -72,6 +72,20 @@ CARD_TEMPLATE = "dark"
 
 
 # ─────────────────────────────────────────────────────────────
+#  CARD TYPE
+#  Controls the Anki note type used when exporting .apkg files.
+#  This is independent of CARD_TEMPLATE (which controls styling).
+#
+#    "basic"          — classic word-to-meaning card (default)
+#    "basic_reversed" — 2 cards per note: word→meaning + meaning→word
+#    "type_answer"    — front shows the definition; user types the word
+#    "cloze"          — fill-in-the-blank using example sentences
+# ─────────────────────────────────────────────────────────────
+
+CARD_TYPE = "basic"
+
+
+# ─────────────────────────────────────────────────────────────
 #  AUDIO
 #  ENABLE_AUDIO        : set False to skip all audio generation
 #                        (faster runs, smaller .apkg files)
