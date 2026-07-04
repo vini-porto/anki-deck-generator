@@ -900,395 +900,139 @@ def write_config(key, value):
     return True
 
 
-def _ask_text(label, current, hint=''):
-    """Prompt for a text value. Returns current if user presses Enter."""
-    if hint:
-        print(f'  {col(hint, "dim")}')
-    print(f'  Current : {col(str(current), "yellow")}')
-    val = ask('New value (Enter to keep)')
-    return val if val else current
+# ─────────────────────────────────────────────
+#  TUI-based configure menus (arrow-key navigation)
+# ─────────────────────────────────────────────
 
+import tui as _tui
 
-def _ask_int(label, current, min_val=0):
-    """Prompt for an integer. Keeps current on empty input or invalid value."""
-    print(f'  Current : {col(str(current), "yellow")}')
-    raw = ask('New value (Enter to keep)')
-    if not raw:
-        return current
-    try:
-        v = int(raw)
-        if v < min_val:
-            print(col(f'  [WARN] Must be >= {min_val}. Keeping {current}.', 'yellow'))
-            return current
-        return v
-    except ValueError:
-        print(col('  [WARN] Not a valid integer. Keeping current.', 'yellow'))
-        return current
-
-
-def _ask_float(label, current, min_val=0.0):
-    """Prompt for a float. Keeps current on empty input or invalid value."""
-    print(f'  Current : {col(str(current), "yellow")}')
-    raw = ask('New value (Enter to keep)')
-    if not raw:
-        return current
-    try:
-        v = float(raw)
-        if v < min_val:
-            print(col(f'  [WARN] Must be >= {min_val}. Keeping {current}.', 'yellow'))
-            return current
-        return v
-    except ValueError:
-        print(col('  [WARN] Not a valid number. Keeping current.', 'yellow'))
-        return current
-
-
-def _pick_option(title, current, options):
-    """
-    Show a numbered list of (value, description) pairs.
-    Returns the chosen value, or current if user cancels.
-    """
-    print(f'\n  {col(title, "bold")}')
-    print(f'  {"─" * 40}')
-    for i, (val, desc) in enumerate(options, 1):
-        marker = col('  <-- current', 'green') if val == current else ''
-        k = col(f'[{i}]', 'yellow')
-        print(f'  {k}  {col(val, "bold")}{marker}')
-        print(f'       {col(desc, "dim")}')
-    print()
-    raw = ask('Enter choice (Enter to keep)')
-    if not raw:
-        return current
-    try:
-        idx = int(raw) - 1
-        if 0 <= idx < len(options):
-            chosen = options[idx][0]
-            print(col(f'  -> Set to: {chosen}', 'green'))
-            time.sleep(0.4)
-            return chosen
-    except ValueError:
-        pass
-    print(col('  [WARN] Invalid choice. Keeping current.', 'yellow'))
-    return current
-
-
-def _toggle_bool(key, label):
-    """Toggle a True/False config value and print the new state."""
-    current = getattr(config, key)
-    new_val = not current
-    write_config(key, new_val)
-    state = col('ON', 'green') if new_val else col('OFF', 'red')
-    print(col(f'  -> {label}: {state}', 'dim'))
-    time.sleep(0.5)
-
-
-def _api_key_status(key):
-    """Return a colored [set] / [not set] indicator for an API key."""
-    val = getattr(config, key, '')
-    if not val or val.startswith('your_'):
-        return col('[not set]', 'red')
-    masked = val[:6] + '...' + val[-4:] if len(val) > 12 else '***'
-    return col(f'[set: {masked}]', 'green')
-
-
-# ── Language ────────────────────────────────
 
 def configure_language():
-    while True:
-        print_banner()
-        print(col('  Language Settings', 'bold', 'cyan'))
-        print(f'  {"─" * 52}\n')
-        rows = [
-            ('1', 'Language to learn (wordfreq code)',    'SOURCE_LANG',    config.SOURCE_LANG),
-            ('2', 'Native language (used in AI prompt)',  'TARGET_LANG',    config.TARGET_LANG),
-            ('3', 'TTS source lang code (gTTS)',          'TTS_SOURCE_LANG',config.TTS_SOURCE_LANG),
-            ('4', 'TTS native lang code (gTTS)',          'TTS_TARGET_LANG',config.TTS_TARGET_LANG),
-        ]
-        for k, label, _, val in rows:
-            print(f'  {col(f"[{k}]", "yellow")}  {label.ljust(40)} {col(val, "bold")}')
-        print(f'\n  {col("[0]", "yellow")}  Back\n')
-        choice = ask('Enter choice')
-        if choice == '0':
-            break
+    _tui.run_menu('Language Settings', [
+        _tui.TextInput('Language to learn',        'SOURCE_LANG',
+                       hint='BCP-47 code, e.g. fr  es  de  ja  pt  ko  ru'),
+        _tui.TextInput('Native language',          'TARGET_LANG',
+                       hint='Full name used in AI prompt, e.g. English  Spanish'),
+        _tui.TextInput('TTS source lang (gTTS)',   'TTS_SOURCE_LANG',
+                       hint='Usually the same as Language to learn'),
+        _tui.TextInput('TTS native lang (gTTS)',   'TTS_TARGET_LANG',
+                       hint='e.g. en  es  pt  de'),
+        _tui.Separator(),
+        _tui.Back(),
+    ])
 
-        cfg_map = {r[0]: (r[2], r[3]) for r in rows}
-        if choice not in cfg_map:
-            continue
-        key, current = cfg_map[choice]
-
-        print_banner()
-        hint_map = {
-            'SOURCE_LANG':     'BCP-47 code of the language you are learning (e.g. fr, es, de, ja, pt)',
-            'TARGET_LANG':     'Full name of your native language used in the AI prompt (e.g. English)',
-            'TTS_SOURCE_LANG': 'gTTS code for the language you are learning — usually same as SOURCE_LANG',
-            'TTS_TARGET_LANG': 'gTTS code for your native language (e.g. en, es, pt)',
-        }
-        print(col(f'  {hint_map.get(key, key)}', 'cyan'))
-        print()
-        new = _ask_text(key, current, '')
-        if new != current:
-            write_config(key, new)
-            # Offer to sync TTS code when changing SOURCE_LANG
-            if key == 'SOURCE_LANG' and new != config.TTS_SOURCE_LANG:
-                print()
-                sync = ask(f'Also set TTS_SOURCE_LANG to "{new}"? [y/N]')
-                if sync.lower() == 'y':
-                    write_config('TTS_SOURCE_LANG', new)
-                    print(col(f'  -> TTS_SOURCE_LANG set to: {new}', 'green'))
-
-
-# ── AI & API keys ───────────────────────────
 
 def configure_ai():
-    while True:
-        print_banner()
-        print(col('  AI & API Settings', 'bold', 'cyan'))
-        print(f'  {"─" * 52}\n')
-        print(f'  {col("[1]", "yellow")}  AI model           {col(config.AI_MODEL, "bold")}')
-        print(f'  {col("[2]", "yellow")}  Groq API key       {_api_key_status("GROQ_API_KEY")}')
-        print(f'  {col("[3]", "yellow")}  Giphy API key      {_api_key_status("GIPHY_API_KEY")}')
-        print(f'\n  {col("[0]", "yellow")}  Back\n')
-        choice = ask('Enter choice')
+    def _after_model_change():
+        AI_HEADERS['Authorization'] = f'Bearer {config.GROQ_API_KEY}'
 
-        if choice == '0':
-            break
-        elif choice == '1':
-            print_banner()
-            new = _pick_option('Select AI Model', config.AI_MODEL, _GROQ_MODELS)
-            if new != config.AI_MODEL:
-                write_config('AI_MODEL', new)
-                AI_HEADERS['Authorization'] = f'Bearer {config.GROQ_API_KEY}'
-        elif choice == '2':
-            print_banner()
-            print(col('  Groq API Key', 'bold', 'cyan'))
-            print(col('  Get yours free at console.groq.com', 'dim'))
-            print()
-            new = _ask_text('GROQ_API_KEY', config.GROQ_API_KEY, '')
-            if new != config.GROQ_API_KEY:
-                write_config('GROQ_API_KEY', new)
-                AI_HEADERS['Authorization'] = f'Bearer {new}'
-                print(col('  -> Groq key updated.', 'green'))
-        elif choice == '3':
-            print_banner()
-            print(col('  Giphy API Key', 'bold', 'cyan'))
-            print(col('  Get yours free at developers.giphy.com', 'dim'))
-            print()
-            new = _ask_text('GIPHY_API_KEY', config.GIPHY_API_KEY, '')
-            if new != config.GIPHY_API_KEY:
-                write_config('GIPHY_API_KEY', new)
-                print(col('  -> Giphy key updated.', 'green'))
+    class _ModelPicker(_tui.Picker):
+        def _set(self, idx):
+            super()._set(idx)
+            _after_model_change()
 
+    class _GroqKey(_tui.TextInput):
+        def on_enter(self, win):
+            super().on_enter(win)
+            AI_HEADERS['Authorization'] = f'Bearer {config.GROQ_API_KEY}'
 
-# ── Deck & card appearance ───────────────────
+    _tui.run_menu('AI & API Settings', [
+        _ModelPicker('AI model', 'AI_MODEL', _GROQ_MODELS),
+        _GroqKey('Groq API key',  'GROQ_API_KEY',  secret=True,
+                 hint='Get yours free at console.groq.com'),
+        _tui.TextInput('Giphy API key', 'GIPHY_API_KEY', secret=True,
+                       hint='Get yours free at developers.giphy.com'),
+        _tui.Separator(),
+        _tui.Back(),
+    ])
+
 
 def configure_deck():
-    while True:
-        print_banner()
-        print(col('  Deck & Card Settings', 'bold', 'cyan'))
-        print(f'  {"─" * 52}\n')
-        rows = [
-            ('1', 'Deck name',         config.DECK_NAME),
-            ('2', 'Card template',     config.CARD_TEMPLATE),
-            ('3', 'Card type',         config.CARD_TYPE),
-            ('4', 'Output — new deck', config.DECK_OUTPUT_NEW),
-            ('5', 'Output — full deck',config.DECK_OUTPUT_FULL),
-        ]
-        for k, label, val in rows:
-            print(f'  {col(f"[{k}]", "yellow")}  {label.ljust(22)} {col(val, "bold")}')
-        print(f'\n  {col("[0]", "yellow")}  Back\n')
-        choice = ask('Enter choice')
+    _tui.run_menu('Deck & Card Settings', [
+        _tui.TextInput('Deck name',          'DECK_NAME',
+                       hint='Name shown inside Anki — avoid changing after first import'),
+        _tui.Picker('Card template',         'CARD_TEMPLATE',  _TEMPLATES),
+        _tui.Picker('Card type',             'CARD_TYPE',      _CARD_TYPES),
+        _tui.TextInput('Output — new deck',  'DECK_OUTPUT_NEW',
+                       hint='.apkg file to import into Anki daily'),
+        _tui.TextInput('Output — full deck', 'DECK_OUTPUT_FULL',
+                       hint='.apkg full backup file'),
+        _tui.Separator(),
+        _tui.Back(),
+    ])
 
-        if choice == '0':
-            break
-        elif choice == '1':
-            print_banner()
-            print(col('  Deck name shown inside Anki', 'cyan'))
-            print(col('  (avoid changing after your first import)', 'dim'))
-            print()
-            new = _ask_text('DECK_NAME', config.DECK_NAME, '')
-            if new != config.DECK_NAME:
-                write_config('DECK_NAME', new)
-        elif choice == '2':
-            print_banner()
-            new = _pick_option('Card template (visual style)', config.CARD_TEMPLATE, _TEMPLATES)
-            if new != config.CARD_TEMPLATE:
-                write_config('CARD_TEMPLATE', new)
-        elif choice == '3':
-            print_banner()
-            new = _pick_option('Card type (Anki note format)', config.CARD_TYPE, _CARD_TYPES)
-            if new != config.CARD_TYPE:
-                write_config('CARD_TYPE', new)
-        elif choice == '4':
-            print_banner()
-            new = _ask_text('DECK_OUTPUT_NEW', config.DECK_OUTPUT_NEW, '.apkg filename for daily imports')
-            if new != config.DECK_OUTPUT_NEW:
-                write_config('DECK_OUTPUT_NEW', new)
-        elif choice == '5':
-            print_banner()
-            new = _ask_text('DECK_OUTPUT_FULL', config.DECK_OUTPUT_FULL, '.apkg filename for full backup')
-            if new != config.DECK_OUTPUT_FULL:
-                write_config('DECK_OUTPUT_FULL', new)
-
-
-# ── Generation volume ────────────────────────
 
 def configure_generation():
-    while True:
-        print_banner()
-        print(col('  Generation Settings', 'bold', 'cyan'))
-        print(f'  {"─" * 52}\n')
-        print(f'  {col("[1]", "yellow")}  Words per run       {col(str(config.WORDS_PER_RUN), "bold")}')
-        print(f'        {col("How many new words are processed each time you run.", "dim")}')
-        print()
-        print(f'  {col("[2]", "yellow")}  Total word pool     {col(str(config.TOTAL_WORD_POOL), "bold")}')
-        print(f'        {col("Size of the most-frequent-word list to draw from.", "dim")}')
-        print(f'\n  {col("[0]", "yellow")}  Back\n')
-        choice = ask('Enter choice')
+    _tui.run_menu('Generation Settings', [
+        _tui.NumberInput('Words per run',   'WORDS_PER_RUN',
+                         hint='Words processed each time the script runs',
+                         min_val=1, step=5),
+        _tui.NumberInput('Total word pool', 'TOTAL_WORD_POOL',
+                         hint='Size of frequency list to draw from',
+                         min_val=100, step=100),
+        _tui.Separator(),
+        _tui.Back(),
+    ])
 
-        if choice == '0':
-            break
-        elif choice == '1':
-            print_banner()
-            print(col('  Words per run', 'bold', 'cyan'))
-            new = _ask_int('WORDS_PER_RUN', config.WORDS_PER_RUN, min_val=1)
-            if new != config.WORDS_PER_RUN:
-                write_config('WORDS_PER_RUN', new)
-        elif choice == '2':
-            print_banner()
-            print(col('  Total word pool', 'bold', 'cyan'))
-            new = _ask_int('TOTAL_WORD_POOL', config.TOTAL_WORD_POOL, min_val=1)
-            if new != config.TOTAL_WORD_POOL:
-                write_config('TOTAL_WORD_POOL', new)
-
-
-# ── Audio ────────────────────────────────────
 
 def configure_audio():
-    bools = [
-        ('1', 'Enable audio (master switch)', 'ENABLE_AUDIO'),
-        ('2', 'Word pronunciation',           'ENABLE_WORD_AUDIO'),
-        ('3', 'Example sentence audio',       'ENABLE_EXAMPLE_AUDIO'),
-        ('4', 'Meaning audio (native lang)',  'ENABLE_MEANING_AUDIO'),
-    ]
-    while True:
-        print_banner()
-        print(col('  Audio Settings  (press number to toggle)', 'bold', 'cyan'))
-        print(f'  {"─" * 52}\n')
-        for k, label, key in bools:
-            val = getattr(config, key)
-            ind = col('[ON] ', 'green') if val else col('[OFF]', 'red')
-            print(f'  {col(f"[{k}]", "yellow")}  {ind}  {label}')
-        print(f'\n  {col("[0]", "yellow")}  Back\n')
-        choice = ask('Enter choice')
-        if choice == '0':
-            break
-        for k, label, key in bools:
-            if choice == k:
-                _toggle_bool(key, label)
-                break
+    _tui.run_menu('Audio Settings', [
+        _tui.Toggle('Enable audio (master switch)', 'ENABLE_AUDIO'),
+        _tui.Separator(),
+        _tui.Toggle('Word pronunciation audio',     'ENABLE_WORD_AUDIO'),
+        _tui.Toggle('Example sentence audio',       'ENABLE_EXAMPLE_AUDIO'),
+        _tui.Toggle('Meaning audio (native lang)',  'ENABLE_MEANING_AUDIO'),
+        _tui.Separator(),
+        _tui.Back(),
+    ])
 
-
-# ── GIF ─────────────────────────────────────
 
 def configure_gif():
-    while True:
-        print_banner()
-        print(col('  GIF Settings', 'bold', 'cyan'))
-        print(f'  {"─" * 52}\n')
-        ind = col('[ON] ', 'green') if config.ENABLE_GIF else col('[OFF]', 'red')
-        print(f'  {col("[1]", "yellow")}  {ind}  Enable GIF  (press to toggle)')
-        print(f'  {col("[2]", "yellow")}  Content rating    {col(config.GIF_RATING, "bold")}')
-        print(f'\n  {col("[0]", "yellow")}  Back\n')
-        choice = ask('Enter choice')
-        if choice == '0':
-            break
-        elif choice == '1':
-            _toggle_bool('ENABLE_GIF', 'Enable GIF')
-        elif choice == '2':
-            print_banner()
-            new = _pick_option('GIF content rating filter', config.GIF_RATING, _GIF_RATINGS)
-            if new != config.GIF_RATING:
-                write_config('GIF_RATING', new)
+    _tui.run_menu('GIF Settings', [
+        _tui.Toggle('Enable GIF (Giphy)',    'ENABLE_GIF'),
+        _tui.Picker('Content rating filter', 'GIF_RATING', _GIF_RATINGS),
+        _tui.Separator(),
+        _tui.Back(),
+    ])
 
-
-# ── Rate limits ──────────────────────────────
 
 def configure_ratelimits():
-    rows = [
-        ('1', 'Groq AI delay',  'DELAY_AI',    lambda: config.DELAY_AI),
-        ('2', 'Giphy delay',    'DELAY_GIPHY', lambda: config.DELAY_GIPHY),
-        ('3', 'gTTS delay',     'DELAY_TTS',   lambda: config.DELAY_TTS),
-    ]
-    while True:
-        print_banner()
-        print(col('  Rate Limiting  (seconds between API calls)', 'bold', 'cyan'))
-        print(f'  {"─" * 52}\n')
-        for k, label, key, getter in rows:
-            print(f'  {col(f"[{k}]", "yellow")}  {label.ljust(20)} {col(str(getter()) + " s", "bold")}')
-        print(f'\n  {col("[0]", "yellow")}  Back\n')
-        choice = ask('Enter choice')
-        if choice == '0':
-            break
-        for k, label, key, getter in rows:
-            if choice == k:
-                print_banner()
-                print(col(f'  {label}', 'bold', 'cyan'))
-                new = _ask_float(key, getter(), min_val=0.0)
-                if new != getter():
-                    write_config(key, new)
-                break
+    _tui.run_menu('Rate Limiting  (seconds between API calls)', [
+        _tui.NumberInput('Groq AI delay', 'DELAY_AI',    min_val=0.0, step=0.1, is_float=True),
+        _tui.NumberInput('Giphy delay',   'DELAY_GIPHY', min_val=0.0, step=0.1, is_float=True),
+        _tui.NumberInput('gTTS delay',    'DELAY_TTS',   min_val=0.0, step=0.1, is_float=True),
+        _tui.Separator(),
+        _tui.Back(),
+    ])
 
-
-# ── Master configure menu ────────────────────
 
 def configure_main():
-    while True:
-        print_banner()
-
-        groq_ok  = not config.GROQ_API_KEY.startswith('your_')
-        giphy_ok = not config.GIPHY_API_KEY.startswith('your_')
-        api_tag  = (col('Groq OK', 'green') if groq_ok else col('Groq missing!', 'red'))
-        api_tag += '  '
-        api_tag += (col('Giphy OK', 'green') if giphy_ok else col('Giphy missing', 'yellow'))
-
-        audio_tag = col('ON', 'green') if config.ENABLE_AUDIO else col('OFF', 'red')
-        gif_tag   = (col('ON', 'green') if config.ENABLE_GIF else col('OFF', 'red'))
-
-        categories = [
-            ('1', 'Language',
-             f'{config.SOURCE_LANG.upper()} -> {config.TARGET_LANG}'),
-            ('2', 'AI & API keys',
-             api_tag),
-            ('3', 'Deck & cards',
-             f'{config.DECK_NAME}  |  {config.CARD_TEMPLATE}  |  {config.CARD_TYPE}'),
-            ('4', 'Generation',
-             f'{config.WORDS_PER_RUN} words / run   pool: {config.TOTAL_WORD_POOL}'),
-            ('5', 'Audio',
-             audio_tag),
-            ('6', 'GIF',
-             f'{gif_tag}  rating: {config.GIF_RATING}'),
-            ('7', 'Rate limits',
-             f'AI {config.DELAY_AI}s  |  Giphy {config.DELAY_GIPHY}s  |  TTS {config.DELAY_TTS}s'),
-        ]
-
-        print_menu('Configure Settings', [(k, label, val) for k, label, val in categories])
-        print(f'  {col("[0]", "yellow")}  {col("Back to main menu", "bold")}\n')
-        choice = ask('Enter choice')
-
-        dispatch = {
-            '1': configure_language,
-            '2': configure_ai,
-            '3': configure_deck,
-            '4': configure_generation,
-            '5': configure_audio,
-            '6': configure_gif,
-            '7': configure_ratelimits,
-        }
-        if choice == '0':
-            break
-        fn = dispatch.get(choice)
-        if fn:
-            fn()
+    _tui.run_menu('Configure Settings', [
+        _tui.Action('Language',
+                    configure_language,
+                    lambda: f'{config.SOURCE_LANG.upper()} -> {config.TARGET_LANG}'),
+        _tui.Action('AI & API keys',
+                    configure_ai,
+                    lambda: ('OK' if not config.GROQ_API_KEY.startswith('your_')
+                             else '! Groq key missing')),
+        _tui.Action('Deck & cards',
+                    configure_deck,
+                    lambda: f'{config.CARD_TEMPLATE}  |  {config.CARD_TYPE}'),
+        _tui.Action('Generation',
+                    configure_generation,
+                    lambda: f'{config.WORDS_PER_RUN}/run   pool {config.TOTAL_WORD_POOL}'),
+        _tui.Action('Audio',
+                    configure_audio,
+                    lambda: 'ON' if config.ENABLE_AUDIO else 'OFF'),
+        _tui.Action('GIF',
+                    configure_gif,
+                    lambda: f'{"ON" if config.ENABLE_GIF else "OFF"}  |  rating: {config.GIF_RATING}'),
+        _tui.Action('Rate limits',
+                    configure_ratelimits,
+                    lambda: f'AI {config.DELAY_AI}s  Giphy {config.DELAY_GIPHY}s  TTS {config.DELAY_TTS}s'),
+        _tui.Separator(),
+        _tui.Back('Back to main menu'),
+    ])
 
 
 # ─────────────────────────────────────────────
@@ -1509,40 +1253,29 @@ def main():
 
     conn = init_db()
 
-    while True:
-        print_banner()
-        options = [
-            ('1', 'Generate new cards',
-             f'Process up to {config.WORDS_PER_RUN} new words from the frequency list'),
-            ('2', 'Export decks',
-             'Build .apkg files — choose the card type before exporting'),
-            ('3', 'Configure',
-             'Change language, AI model, card type, audio, GIF, and more'),
-            ('4', 'Statistics',
-             'Card counts, POS breakdown, and export history'),
-            ('5', 'Card type guide',
-             'Learn the difference between Basic, Reversed, Type, and Cloze'),
-            ('0', 'Exit', ''),
-        ]
-        print_menu('Main Menu', options)
-
-        choice = ask('Enter choice')
-
-        if choice == '1':
-            run_generate(conn)
-        elif choice == '2':
-            run_export(conn)
-        elif choice == '3':
-            configure_main()
-        elif choice == '4':
-            show_statistics(conn)
-        elif choice == '5':
-            show_card_types()
-        elif choice == '0':
-            print()
-            print(col('  Goodbye!', 'cyan', 'bold'))
-            print()
-            break
+    _tui.run_menu('Main Menu', [
+        _tui.Action('Generate new cards',
+                    lambda: run_generate(conn),
+                    lambda: f'Up to {config.WORDS_PER_RUN} words from the frequency list',
+                    print_mode=True),
+        _tui.Action('Export decks',
+                    lambda: run_export(conn),
+                    'Build .apkg  —  choose card type before exporting',
+                    print_mode=True),
+        _tui.Action('Configure',
+                    configure_main,
+                    lambda: f'{config.SOURCE_LANG.upper()} -> {config.TARGET_LANG}'),
+        _tui.Action('Statistics',
+                    lambda: show_statistics(conn),
+                    'Card counts, POS breakdown, export history',
+                    print_mode=True),
+        _tui.Action('Card type guide',
+                    show_card_types,
+                    'Basic / Reversed / Type / Cloze',
+                    print_mode=True),
+        _tui.Separator(),
+        _tui.Back('Exit'),
+    ])
 
     conn.close()
 
