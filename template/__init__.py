@@ -1,7 +1,7 @@
-# templates/__init__.py
+# template/__init__.py
 # Registers all available card templates.
 
-from templates import dark, light, minimal, immersive
+from template import dark, light, minimal, immersive
 
 AVAILABLE = {
     "dark":      dark,
