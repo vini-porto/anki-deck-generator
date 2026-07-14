@@ -5,18 +5,41 @@
 
 
 # ─────────────────────────────────────────────────────────────
+#  AI PROVIDER
+#  Which AI service generates flashcard content. Only the
+#  API key and model belonging to the chosen provider are used.
+#    "groq"      — free tier, Llama / Gemma / Mixtral  (default)
+#    "openai"    — ChatGPT / GPT models
+#    "anthropic" — Claude models
+#    "gemini"    — Google Gemini
+#    "ollama"    — runs locally, no API key or internet required
+# ─────────────────────────────────────────────────────────────
+
+AI_PROVIDER = "groq"
+
+
+# ─────────────────────────────────────────────────────────────
 #  API KEYS
 #  Get your free keys at:
-#    Groq  : https://console.groq.com
-#    Giphy : https://developers.giphy.com
+#    Groq      : https://console.groq.com
+#    OpenAI    : https://platform.openai.com/api-keys
+#    Anthropic : https://console.anthropic.com/settings/keys
+#    Gemini    : https://aistudio.google.com/apikey
+#    Giphy     : https://developers.giphy.com
+#  Ollama runs locally — no key needed, see OLLAMA_HOST below.
 # ─────────────────────────────────────────────────────────────
 
-GROQ_API_KEY  = "your_groq_api_key_here"
-GIPHY_API_KEY = "your_giphy_api_key_here"
+GROQ_API_KEY      = "your_groq_api_key_here"
+OPENAI_API_KEY    = "your_openai_api_key_here"
+ANTHROPIC_API_KEY = "your_anthropic_api_key_here"
+GEMINI_API_KEY    = "your_gemini_api_key_here"
+GIPHY_API_KEY     = "your_giphy_api_key_here"
 
 
 # ─────────────────────────────────────────────────────────────
-#  AI MODEL
+#  AI MODELS
+#  Only the model belonging to the active AI_PROVIDER is used.
+#
 #  Groq free-tier models (pick one):
 #    "llama-3.3-70b-versatile"  — best quality  (recommended)
 #    "llama-3.1-8b-instant"     — faster, lighter
@@ -24,7 +47,12 @@ GIPHY_API_KEY = "your_giphy_api_key_here"
 #    "mixtral-8x7b-32768"       — Mixtral
 # ─────────────────────────────────────────────────────────────
 
-AI_MODEL = "llama-3.3-70b-versatile"
+AI_MODEL        = "llama-3.3-70b-versatile"  # used when AI_PROVIDER = "groq"
+OPENAI_MODEL    = "gpt-4o-mini"              # used when AI_PROVIDER = "openai"
+ANTHROPIC_MODEL = "claude-haiku-4-5"         # used when AI_PROVIDER = "anthropic"
+GEMINI_MODEL    = "gemini-2.0-flash"         # used when AI_PROVIDER = "gemini"
+OLLAMA_MODEL    = "llama3.1"                 # used when AI_PROVIDER = "ollama"
+OLLAMA_HOST     = "http://localhost:11434"   # Ollama server address
 
 
 # ─────────────────────────────────────────────────────────────
@@ -82,7 +110,7 @@ CARD_TEMPLATE = "dark"
 #    "cloze"          — fill-in-the-blank using example sentences
 # ─────────────────────────────────────────────────────────────
 
-CARD_TYPE = "basic"
+CARD_TYPE = "type_answer"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -139,6 +167,6 @@ MODEL_ID = 9876543212
 #  free-tier rate limits.
 # ─────────────────────────────────────────────────────────────
 
-DELAY_AI    = 1.5   # between Groq calls
+DELAY_AI    = 1.5   # between AI provider calls
 DELAY_GIPHY = 0.4   # between Giphy calls
 DELAY_TTS   = 0.3   # between gTTS calls

@@ -12,7 +12,9 @@ Changes from v1: interactive menu, 4 card types, statistics screen, settings vie
 
 Generates rich Anki flashcard decks (.apkg) for vocabulary learning.
 For each word in a frequency list, it:
-1. Calls the Groq API (LLaMA 3) to generate all card content via a structured JSON prompt.
+1. Calls an AI provider (Groq, OpenAI, Anthropic/Claude, Google Gemini, or a local
+   Ollama model — selected via `AI_PROVIDER` in config.py) to generate all card
+   content via a structured JSON prompt.
 2. Fetches an animated GIF from Giphy using 3 AI-generated hashtag keywords.
 3. Generates 3 MP3 audio files via gTTS (word, example sentence, meaning).
 4. Saves everything to a SQLite database (progress.db).
@@ -92,9 +94,27 @@ so the database schema can be extended without breaking existing databases.
 
 ---
 
-## Groq prompt structure
+## AI provider layer
 
-The prompt asks for a JSON response with this shape:
+`AI_PROVIDER` in config.py selects which service `generate_card_content()` calls:
+`"groq"` (default), `"openai"`, `"anthropic"`, `"gemini"`, or `"ollama"` (local,
+no API key). Each provider has its own API key + model config fields (e.g.
+`ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL`); only the active provider's fields are
+used. `main.py` dispatches through `AI_PROVIDER_CALLERS` to one of `_call_groq`,
+`_call_openai`, `_call_anthropic`, `_call_gemini`, `_call_ollama` — all return
+raw response text that is then parsed as JSON by the shared prompt/parsing logic.
+Groq, OpenAI, Gemini, and Ollama are called via raw HTTP (`requests`); Claude is
+called via the official `anthropic` SDK (lazily imported so it's not a hard
+dependency for users on other providers).
+
+To add a new provider: write a `_call_<provider>(prompt) -> str` function, add
+it to `AI_PROVIDER_CALLERS` / `AI_PROVIDER_KEY_FIELD` / `AI_PROVIDER_MODEL_FIELD`
+/ `AI_PROVIDER_LABELS`, add its config.py fields, and add a branch in
+`configure_ai()`'s `_provider_settings()` for the settings TUI.
+
+## AI prompt structure
+
+The prompt asks for a JSON response with this shape (identical across all providers):
 ```json
 {
   "ipa": "...",
@@ -194,7 +214,8 @@ Both files use the same Anki model (MODEL_ID) but different DECK_IDs
 genanki    — creates .apkg files for Anki
 gTTS       — Google Text-to-Speech for audio generation
 wordfreq   — frequency-ranked word lists for any language
-requests   — HTTP calls to Groq and Giphy APIs
+requests   — HTTP calls to Groq/OpenAI/Gemini/Ollama and Giphy APIs
+anthropic  — optional, only required when AI_PROVIDER = "anthropic"
 ```
 
 ---
@@ -232,8 +253,10 @@ Export -> Card Type Selection
 ## Config options summary (config.py)
 
 ```python
-GROQ_API_KEY / GIPHY_API_KEY   # API credentials
-AI_MODEL                        # Groq model string
+AI_PROVIDER                     # "groq" | "openai" | "anthropic" | "gemini" | "ollama"
+GROQ_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY / GIPHY_API_KEY
+AI_MODEL / OPENAI_MODEL / ANTHROPIC_MODEL / GEMINI_MODEL / OLLAMA_MODEL
+OLLAMA_HOST                     # local Ollama server address (default http://localhost:11434)
 SOURCE_LANG / TARGET_LANG       # e.g. "fr" / "English"
 TTS_SOURCE_LANG / TTS_TARGET_LANG  # gTTS language codes
 WORDS_PER_RUN                   # new words per script execution

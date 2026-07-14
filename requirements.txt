@@ -2,3 +2,6 @@ genanki
 gTTS
 wordfreq
 requests
+
+# Only needed if AI_PROVIDER = "anthropic" in config.py
+# anthropic

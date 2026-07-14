@@ -88,7 +88,8 @@ def print_banner():
     title    = col('  Anki Vocabulary Deck Generator  v2.0  ', 'bold', 'cyan')
     lang     = col(f'  Language : {config.SOURCE_LANG.upper()} -> {config.TARGET_LANG}', 'yellow')
     tmpl     = col(f'  Template : {config.CARD_TEMPLATE}   |   Card type : {config.CARD_TYPE}', 'dim')
-    model    = col(f'  AI model : {config.AI_MODEL}', 'dim')
+    provider = AI_PROVIDER_LABELS.get(current_ai_provider(), current_ai_provider())
+    model    = col(f'  AI provider : {provider}   |   Model : {current_ai_model()}', 'dim')
     print('╔' + _hline() + '╗')
     print(_row(title))
     print('╠' + _hline() + '╣')
@@ -287,14 +288,60 @@ def pos_to_tag(pos_str):
 
 
 # ─────────────────────────────────────────────
-#  AI content generation (Groq)
+#  AI content generation (multi-provider)
 # ─────────────────────────────────────────────
 
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_URL        = "https://api.groq.com/openai/v1/chat/completions"
+OPENAI_URL      = "https://api.openai.com/v1/chat/completions"
+GEMINI_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
 AI_HEADERS = {
     "Authorization": f"Bearer {config.GROQ_API_KEY}",
     "Content-Type":  "application/json",
 }
+
+# Providers whose credential is an API key checked against the config.py
+# placeholder. Ollama runs locally and needs no key.
+AI_PROVIDER_KEY_FIELD = {
+    "groq":      "GROQ_API_KEY",
+    "openai":    "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini":    "GEMINI_API_KEY",
+}
+
+AI_PROVIDER_MODEL_FIELD = {
+    "groq":      "AI_MODEL",
+    "openai":    "OPENAI_MODEL",
+    "anthropic": "ANTHROPIC_MODEL",
+    "gemini":    "GEMINI_MODEL",
+    "ollama":    "OLLAMA_MODEL",
+}
+
+AI_PROVIDER_LABELS = {
+    "groq":      "Groq",
+    "openai":    "OpenAI",
+    "anthropic": "Claude",
+    "gemini":    "Gemini",
+    "ollama":    "Ollama",
+}
+
+
+def current_ai_provider():
+    return getattr(config, "AI_PROVIDER", "groq")
+
+
+def current_ai_model():
+    field = AI_PROVIDER_MODEL_FIELD.get(current_ai_provider(), "AI_MODEL")
+    return getattr(config, field, "")
+
+
+def ai_key_missing():
+    """True if the active provider needs a key and it hasn't been set."""
+    field = AI_PROVIDER_KEY_FIELD.get(current_ai_provider())
+    if field is None:  # ollama — no key required
+        return False
+    return getattr(config, field, "").startswith("your_")
+
 
 PROMPT_TEMPLATE = """You are a language expert creating Anki flashcard content \
 for {target_lang} speakers learning {source_lang}.
@@ -335,32 +382,122 @@ Rules:
 - Return raw JSON only — no markdown fences, no extra text"""
 
 
-def generate_card_content(word):
-    prompt = PROMPT_TEMPLATE.format(
-        word=word,
-        source_lang=config.SOURCE_LANG,
-        target_lang=config.TARGET_LANG,
-    )
+def _clean_json_text(raw):
+    raw = raw.strip()
+    raw = re.sub(r"^```(?:json)?", "", raw).strip()
+    raw = re.sub(r"```$", "", raw).strip()
+    return json.loads(raw)
+
+
+def _call_groq(prompt):
     payload = {
         "model":       config.AI_MODEL,
         "temperature": 0.3,
         "max_tokens":  1024,
         "messages":    [{"role": "user", "content": prompt}],
     }
+    resp = requests.post(GROQ_URL, headers=AI_HEADERS, json=payload, timeout=30)
+    if resp.status_code != 200:
+        print(f"    [Groq] HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+def _call_openai(prompt):
+    headers = {
+        "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+        "Content-Type":  "application/json",
+    }
+    payload = {
+        "model":       config.OPENAI_MODEL,
+        "temperature": 0.3,
+        "max_tokens":  1024,
+        "messages":    [{"role": "user", "content": prompt}],
+    }
+    resp = requests.post(OPENAI_URL, headers=headers, json=payload, timeout=30)
+    if resp.status_code != 200:
+        print(f"    [OpenAI] HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+def _call_anthropic(prompt):
     try:
-        resp = requests.post(GROQ_URL, headers=AI_HEADERS, json=payload, timeout=30)
-        if resp.status_code != 200:
-            print(f"    [Groq] HTTP {resp.status_code}: {resp.text[:200]}")
+        import anthropic
+    except ImportError:
+        print("    [Claude] Missing dependency — run: pip install anthropic")
+        return None
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    response = client.messages.create(
+        model=config.ANTHROPIC_MODEL,
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return next((b.text for b in response.content if b.type == "text"), "")
+
+
+def _call_gemini(prompt):
+    url = GEMINI_URL_TMPL.format(model=config.GEMINI_MODEL)
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024},
+    }
+    resp = requests.post(
+        url, params={"key": config.GEMINI_API_KEY}, json=payload, timeout=30
+    )
+    if resp.status_code != 200:
+        print(f"    [Gemini] HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+    candidates = resp.json().get("candidates", [])
+    if not candidates:
+        return None
+    parts = candidates[0].get("content", {}).get("parts", [])
+    return "".join(p.get("text", "") for p in parts)
+
+
+def _call_ollama(prompt):
+    url = f"{config.OLLAMA_HOST.rstrip('/')}/api/chat"
+    payload = {
+        "model":    config.OLLAMA_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream":   False,
+        "options":  {"temperature": 0.3},
+    }
+    resp = requests.post(url, json=payload, timeout=120)
+    if resp.status_code != 200:
+        print(f"    [Ollama] HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+    return resp.json().get("message", {}).get("content", "")
+
+
+AI_PROVIDER_CALLERS = {
+    "groq":      _call_groq,
+    "openai":    _call_openai,
+    "anthropic": _call_anthropic,
+    "gemini":    _call_gemini,
+    "ollama":    _call_ollama,
+}
+
+
+def generate_card_content(word):
+    prompt = PROMPT_TEMPLATE.format(
+        word=word,
+        source_lang=config.SOURCE_LANG,
+        target_lang=config.TARGET_LANG,
+    )
+    provider = current_ai_provider()
+    label    = AI_PROVIDER_LABELS.get(provider, provider)
+    call_fn  = AI_PROVIDER_CALLERS.get(provider, _call_groq)
+    try:
+        raw = call_fn(prompt)
+        if not raw:
             return None
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
-        raw = re.sub(r"^```(?:json)?", "", raw).strip()
-        raw = re.sub(r"```$", "", raw).strip()
-        return json.loads(raw)
+        return _clean_json_text(raw)
     except json.JSONDecodeError as e:
-        print(f"    [Groq] Invalid JSON for '{word}': {e}")
+        print(f"    [{label}] Invalid JSON for '{word}': {e}")
         return None
     except Exception as e:
-        print(f"    [Groq] Error for '{word}': {e}")
+        print(f"    [{label}] Error for '{word}': {e}")
         return None
 
 
@@ -829,11 +966,25 @@ def select_card_type():
 #  Settings editor — persistent writes to config.py
 # ─────────────────────────────────────────────
 
+_AI_PROVIDERS = [
+    ("groq",      "Groq — free tier, Llama / Gemma / Mixtral (default)"),
+    ("openai",    "OpenAI — ChatGPT / GPT models"),
+    ("anthropic", "Anthropic — Claude models"),
+    ("gemini",    "Google — Gemini models"),
+    ("ollama",    "Ollama — run a model locally, no API key needed"),
+]
+
 _GROQ_MODELS = [
     ("llama-3.3-70b-versatile", "Best quality — recommended"),
     ("llama-3.1-8b-instant",    "Faster and lighter"),
     ("gemma2-9b-it",            "Google Gemma 2"),
     ("mixtral-8x7b-32768",      "Mixtral, long context window"),
+]
+
+_ANTHROPIC_MODELS = [
+    ("claude-haiku-4-5", "Fastest and most cost-effective — recommended"),
+    ("claude-sonnet-5",  "Best balance of speed and quality"),
+    ("claude-opus-4-8",  "Most capable, highest cost"),
 ]
 
 _TEMPLATES = [
@@ -923,23 +1074,73 @@ def configure_language():
 
 
 def configure_ai():
-    def _after_model_change():
+    def _after_groq_key_change():
         AI_HEADERS['Authorization'] = f'Bearer {config.GROQ_API_KEY}'
 
-    class _ModelPicker(_tui.Picker):
+    class _GroqModelPicker(_tui.Picker):
         def _set(self, idx):
             super()._set(idx)
-            _after_model_change()
+            _after_groq_key_change()
 
     class _GroqKey(_tui.TextInput):
         def on_enter(self, win):
             super().on_enter(win)
-            AI_HEADERS['Authorization'] = f'Bearer {config.GROQ_API_KEY}'
+            _after_groq_key_change()
+
+    def _provider_settings():
+        provider = current_ai_provider()
+        if provider == "groq":
+            _tui.run_menu('Groq Settings', [
+                _GroqModelPicker('AI model', 'AI_MODEL', _GROQ_MODELS),
+                _GroqKey('Groq API key', 'GROQ_API_KEY', secret=True,
+                         hint='Get yours free at console.groq.com'),
+                _tui.Separator(),
+                _tui.Back(),
+            ])
+        elif provider == "openai":
+            _tui.run_menu('OpenAI Settings', [
+                _tui.TextInput('AI model', 'OPENAI_MODEL',
+                               hint='e.g. gpt-4o-mini  gpt-4o  gpt-4.1-mini  gpt-4.1'),
+                _tui.TextInput('OpenAI API key', 'OPENAI_API_KEY', secret=True,
+                               hint='Get yours at platform.openai.com/api-keys'),
+                _tui.Separator(),
+                _tui.Back(),
+            ])
+        elif provider == "anthropic":
+            _tui.run_menu('Claude (Anthropic) Settings', [
+                _tui.Picker('AI model', 'ANTHROPIC_MODEL', _ANTHROPIC_MODELS),
+                _tui.TextInput('Anthropic API key', 'ANTHROPIC_API_KEY', secret=True,
+                               hint='Get yours at console.anthropic.com/settings/keys'),
+                _tui.Separator(),
+                _tui.Back(),
+            ])
+        elif provider == "gemini":
+            _tui.run_menu('Gemini Settings', [
+                _tui.TextInput('AI model', 'GEMINI_MODEL',
+                               hint='e.g. gemini-2.0-flash  gemini-1.5-flash  gemini-1.5-pro'),
+                _tui.TextInput('Gemini API key', 'GEMINI_API_KEY', secret=True,
+                               hint='Get yours at aistudio.google.com/apikey'),
+                _tui.Separator(),
+                _tui.Back(),
+            ])
+        else:  # ollama
+            _tui.run_menu('Ollama Settings', [
+                _tui.TextInput('AI model', 'OLLAMA_MODEL',
+                               hint='Must already be pulled locally, e.g. llama3.1  mistral  qwen2.5'),
+                _tui.TextInput('Ollama server address', 'OLLAMA_HOST',
+                               hint='e.g. http://localhost:11434'),
+                _tui.Separator(),
+                _tui.Back(),
+            ])
 
     _tui.run_menu('AI & API Settings', [
-        _ModelPicker('AI model', 'AI_MODEL', _GROQ_MODELS),
-        _GroqKey('Groq API key',  'GROQ_API_KEY',  secret=True,
-                 hint='Get yours free at console.groq.com'),
+        _tui.Picker('AI provider', 'AI_PROVIDER', _AI_PROVIDERS),
+        _tui.Action('Provider settings',
+                    _provider_settings,
+                    lambda: (f'{AI_PROVIDER_LABELS.get(current_ai_provider(), current_ai_provider())}'
+                             f'  |  {current_ai_model()}'
+                             + ('' if not ai_key_missing() else '   ! key missing'))),
+        _tui.Separator(),
         _tui.TextInput('Giphy API key', 'GIPHY_API_KEY', secret=True,
                        hint='Get yours free at developers.giphy.com'),
         _tui.Separator(),
@@ -1013,8 +1214,8 @@ def configure_main():
                     lambda: f'{config.SOURCE_LANG.upper()} -> {config.TARGET_LANG}'),
         _tui.Action('AI & API keys',
                     configure_ai,
-                    lambda: ('OK' if not config.GROQ_API_KEY.startswith('your_')
-                             else '! Groq key missing')),
+                    lambda: (f'{AI_PROVIDER_LABELS.get(current_ai_provider(), current_ai_provider())}'
+                             + ('' if not ai_key_missing() else '  ! key missing'))),
         _tui.Action('Deck & cards',
                     configure_deck,
                     lambda: f'{config.CARD_TEMPLATE}  |  {config.CARD_TYPE}'),
@@ -1045,8 +1246,9 @@ def run_generate(conn):
     print(col('  Generate New Cards', 'bold', 'cyan'))
     print(f'  {"─" * 52}')
 
-    if config.GROQ_API_KEY == "your_groq_api_key_here":
-        print(col('\n  [ERROR] GROQ_API_KEY not set in config.py', 'red'))
+    if ai_key_missing():
+        field = AI_PROVIDER_KEY_FIELD.get(current_ai_provider(), "GROQ_API_KEY")
+        print(col(f'\n  [ERROR] {field} not set in config.py', 'red'))
         pause()
         return
 
@@ -1214,11 +1416,13 @@ def _run_headless():
     print(f"  Language : {config.SOURCE_LANG.upper()}  |  "
           f"Template : {config.CARD_TEMPLATE}  |  "
           f"Card type : {config.CARD_TYPE}  |  "
-          f"AI model : {config.AI_MODEL}")
+          f"AI provider : {AI_PROVIDER_LABELS.get(current_ai_provider(), current_ai_provider())}  |  "
+          f"AI model : {current_ai_model()}")
     print("=" * 60)
 
-    if config.GROQ_API_KEY == "your_groq_api_key_here":
-        print("\n[ERROR] Please set your GROQ_API_KEY in config.py")
+    if ai_key_missing():
+        field = AI_PROVIDER_KEY_FIELD.get(current_ai_provider(), "GROQ_API_KEY")
+        print(f"\n[ERROR] Please set your {field} in config.py")
         sys.exit(1)
     if config.ENABLE_GIF and config.GIPHY_API_KEY == "your_giphy_api_key_here":
         print("\n[WARN] GIPHY_API_KEY not set — GIFs will be disabled.")
