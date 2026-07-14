@@ -307,6 +307,7 @@ Future goals for this project. Completed items are struck through.
 - [ ] Add multiple realistic AI-generated voices, produced **locally** (no cloud TTS dependency)
 - [ ] Add a beautiful interactive menu (TUI) built with JavaScript
 - [x] ~~Include more templates for cards~~ — 4 available: dark, light, minimal, immersive
+- [ ] Categorize cards into language-specific subfolders/subdecks (e.g. "Phrasal Verbs", "Verb Conjugation" for English) and track the category in Anki tags
 
 ---
 
