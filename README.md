@@ -16,7 +16,7 @@
 
 **AI-generated flashcards for any language** · example sentences · IPA · audio · animated GIFs · synonyms · gender · POS tags · interactive terminal UI
 
-[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Roadmap](#roadmap)
+[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Categories & Subdecks](#categories--subdecks) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Roadmap](#roadmap)
 
 ---
 
@@ -212,6 +212,33 @@ Browse → Create Filtered Deck → tag:vocab::Verb
 
 ---
 
+## Categories & subdecks
+
+Many languages have study "blocks" that don't map to part of speech at all,
+and vary from language to language — English learners often study **Phrasal
+Verbs** or **Verb Conjugation** as their own topic, for example. When
+`ENABLE_CATEGORIES` is on (default), the AI may tag a meaning with one of
+these language-specific categories, and the card is then organized **two
+ways** in Anki:
+
+- **Subdeck** — filed into `<Deck Name>::<Category>`, e.g.
+  `French Vocabulary::Phrasal Verbs`, alongside the regular deck.
+- **Tag** — `topic::<Category>` (e.g. `topic::Phrasal_Verbs`), so you can
+  filter or build Filtered Decks the same way as with `vocab::<POS>` tags.
+
+Plain vocabulary that doesn't fit a special category is left uncategorized
+and stays in the root deck — categories only appear when they're genuinely
+useful. Categories are **registered and reused**: once the AI introduces
+"Phrasal Verbs" for a deck, later runs are told about it and reuse the exact
+same name instead of coining near-duplicates like "Phrasal Verb" or "Verbs +
+Prepositions".
+
+Turn it off from **Configure → Deck & cards → Category subdecks & tags**, or
+set `ENABLE_CATEGORIES = False` in config.py — cards then only go in the root
+deck, with no `topic::` tag.
+
+---
+
 ## Supported languages
 
 Any language supported by [wordfreq](https://github.com/rspeer/wordfreq).
@@ -257,6 +284,8 @@ TOTAL_WORD_POOL = 2000         # total frequency pool size
 
 CARD_TEMPLATE = "dark"         # dark | light | minimal | immersive
 CARD_TYPE     = "basic"        # basic | basic_reversed | type_answer | cloze
+
+ENABLE_CATEGORIES = True       # AI-tagged subdecks + topic:: tags (e.g. "Phrasal Verbs")
 
 ENABLE_AUDIO         = True    # master audio switch
 ENABLE_WORD_AUDIO    = True
@@ -307,7 +336,7 @@ Future goals for this project. Completed items are struck through.
 - [ ] Add multiple realistic AI-generated voices, produced **locally** (no cloud TTS dependency)
 - [ ] Add a beautiful interactive menu (TUI) built with JavaScript
 - [x] ~~Include more templates for cards~~ — 4 available: dark, light, minimal, immersive
-- [ ] Categorize cards into language-specific subfolders/subdecks (e.g. "Phrasal Verbs", "Verb Conjugation" for English) and track the category in Anki tags
+- [x] ~~Categorize cards into language-specific subfolders/subdecks (e.g. "Phrasal Verbs", "Verb Conjugation" for English) and track the category in Anki tags~~ — see [Categories & subdecks](#categories--subdecks)
 
 ---
 
