@@ -168,6 +168,38 @@ using the `POS_TAG_MAP` dictionary in main.py.
 
 ---
 
+## Planned: category/subfolder organization (not yet implemented)
+
+**Problem:** POS tagging (`vocab::Noun`, `vocab::Verb`) is language-agnostic, but
+many languages have study "blocks" that don't map to POS at all and vary from
+language to language — e.g. English has "Phrasal Verbs" and "Verb Conjugation";
+other languages may have their own distinct groupings (French might warrant
+"Faux Amis", Japanese might warrant "Keigo", etc.). There's currently no way to
+register or reuse these categories, so each language's real study structure
+isn't reflected in the deck.
+
+**Direction for implementation** (for whoever picks this up):
+- A `category` (or `subcategory`) concept per card, similar to `pos` — likely a
+  new `cards.category` column added via the existing soft-migration pattern in
+  `init_db()`, populated either by extending the AI JSON response schema
+  (`PROMPT_TEMPLATE` in main.py) with a `category` field per meaning, or by a
+  user-maintained mapping.
+- Categories are **language-specific and open-ended** — unlike `POS_TAG_MAP`
+  (a small fixed set), there's no universal list. Whatever registry is built
+  should let categories be defined/extended per `SOURCE_LANG` rather than
+  hardcoded once for all languages, and should persist so a category coined for
+  one run is recognized and reused on later runs instead of drifting into
+  near-duplicate names.
+- **Anki tags** are the natural place to surface this (mirrors the existing
+  `vocab::<POS>` scheme) — likely `vocab::<POS>::<Category>` or a parallel
+  `topic::<Category>` tag, so filtering/Filtered Decks keep working. Actual
+  Anki **subdecks** are a separate, heavier option (`genanki` supports deck
+  hierarchy via `"Parent::Child"` deck names) — tags are the lower-risk default
+  since `export_decks()` currently assumes one flat deck per DECK_ID; decide
+  based on how the user wants to browse/study rather than defaulting to decks.
+
+---
+
 ## Export logic
 
 Two .apkg files are generated on every run:
