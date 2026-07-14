@@ -16,7 +16,7 @@
 
 **AI-generated flashcards for any language** · example sentences · IPA · audio · animated GIFs · synonyms · gender · POS tags · interactive terminal UI
 
-[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow)
+[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Roadmap](#roadmap)
 
 ---
 
@@ -297,6 +297,16 @@ ANTHROPIC_API_KEY = "your_anthropic_api_key_here"
 GEMINI_API_KEY    = "your_gemini_api_key_here"
 GIPHY_API_KEY     = "your_giphy_api_key_here"
 ```
+
+---
+
+## Roadmap
+
+Future goals for this project. Completed items are struck through.
+
+- [ ] Add multiple realistic AI-generated voices, produced **locally** (no cloud TTS dependency)
+- [ ] Add a beautiful interactive menu (TUI) built with JavaScript
+- [x] ~~Include more templates for cards~~ — 4 available: dark, light, minimal, immersive
 
 ---
 
