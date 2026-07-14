@@ -10,13 +10,13 @@
 
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
-[![AI](https://img.shields.io/badge/AI-Groq%20%2F%20LLaMA--3-orange?style=flat-square)](https://console.groq.com)
+[![AI](https://img.shields.io/badge/AI-Groq%20%7C%20OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama-orange?style=flat-square)](https://console.groq.com)
 [![GIFs](https://img.shields.io/badge/GIFs-Giphy-yellow?style=flat-square)](https://developers.giphy.com)
 [![Anki](https://img.shields.io/badge/export-.apkg-lightblue?style=flat-square)](https://apps.ankiweb.net)
 
 **AI-generated flashcards for any language** · example sentences · IPA · audio · animated GIFs · synonyms · gender · POS tags · interactive terminal UI
 
-[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow)
+[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Roadmap](#roadmap)
 
 ---
 
@@ -62,17 +62,31 @@ pip install -r requirements.txt
 
 ### 4. Get your free API keys
 
+Pick **one** AI provider (set via `AI_PROVIDER` in config.py, or in the Configure menu):
+
+| Provider | Link | Free tier |
+|---|---|---|
+| **Groq** (default) | https://console.groq.com | 14,400 requests/day |
+| **OpenAI** (ChatGPT) | https://platform.openai.com/api-keys | Pay-as-you-go |
+| **Anthropic** (Claude) | https://console.anthropic.com/settings/keys | Pay-as-you-go |
+| **Gemini** (Google) | https://aistudio.google.com/apikey | Free tier available |
+| **Ollama** (local) | https://ollama.com — no API key, runs on your machine | Free, unlimited |
+
+Plus GIFs:
+
 | Service | Link | Free tier |
 |---|---|---|
-| **Groq** (AI) | https://console.groq.com | 14,400 requests/day |
 | **Giphy** (GIFs) | https://developers.giphy.com | 100 requests/hour |
+
+> Using **Anthropic/Claude**? Also run `pip install anthropic` — it's an optional
+> dependency not installed by `requirements.txt` by default.
 
 ### 5. Run
 ```bash
 python main.py
 ```
 
-The interactive menu opens. Go to **Configure → AI & API keys** to enter your keys directly in the terminal — no need to edit any file manually.
+The interactive menu opens. Go to **Configure → AI & API keys** to pick your provider and enter your keys directly in the terminal — no need to edit any file manually.
 
 ### 6. Generate cards and import into Anki
 
@@ -118,7 +132,7 @@ All settings can be changed without touching any file:
   Configure Settings
   ──────────────────────────────────────────
     Language          FR -> English
-    AI & API keys     OK
+    AI & API keys     Groq
     Deck & cards      dark  |  basic
     Generation        50/run   pool 2000
     Audio             ON
@@ -218,15 +232,25 @@ Common codes: `fr` French · `es` Spanish · `de` German · `it` Italian · `pt`
 All settings live in `config.py` and can also be changed at runtime from the **Configure** menu.
 
 ```python
-GROQ_API_KEY  = "..."          # Groq API key
-GIPHY_API_KEY = "..."          # Giphy API key
+AI_PROVIDER = "groq"           # groq | openai | anthropic | gemini | ollama
+
+GROQ_API_KEY      = "..."      # Groq API key
+OPENAI_API_KEY    = "..."      # OpenAI API key
+ANTHROPIC_API_KEY = "..."      # Anthropic (Claude) API key
+GEMINI_API_KEY    = "..."      # Google Gemini API key
+GIPHY_API_KEY     = "..."      # Giphy API key
 
 SOURCE_LANG      = "fr"        # language to learn (BCP-47 code)
 TARGET_LANG      = "English"   # your native language
 TTS_SOURCE_LANG  = "fr"        # gTTS code for source language audio
 TTS_TARGET_LANG  = "en"        # gTTS code for native language audio
 
-AI_MODEL = "llama-3.3-70b-versatile"   # Groq model
+AI_MODEL        = "llama-3.3-70b-versatile"  # used when AI_PROVIDER = "groq"
+OPENAI_MODEL    = "gpt-4o-mini"              # used when AI_PROVIDER = "openai"
+ANTHROPIC_MODEL = "claude-haiku-4-5"         # used when AI_PROVIDER = "anthropic"
+GEMINI_MODEL    = "gemini-2.0-flash"         # used when AI_PROVIDER = "gemini"
+OLLAMA_MODEL    = "llama3.1"                 # used when AI_PROVIDER = "ollama"
+OLLAMA_HOST     = "http://localhost:11434"   # local Ollama server address
 
 WORDS_PER_RUN   = 50           # words processed per run
 TOTAL_WORD_POOL = 2000         # total frequency pool size
@@ -242,7 +266,7 @@ ENABLE_MEANING_AUDIO = True
 ENABLE_GIF = True              # fetch animated GIFs from Giphy
 GIF_RATING = "g"               # g | pg | pg-13 | r
 
-DELAY_AI    = 1.5              # seconds between Groq calls
+DELAY_AI    = 1.5              # seconds between AI provider calls
 DELAY_GIPHY = 0.4              # seconds between Giphy calls
 DELAY_TTS   = 0.3              # seconds between gTTS calls
 ```
@@ -267,9 +291,22 @@ DELAY_TTS   = 0.3              # seconds between gTTS calls
 replace your keys with placeholder values before pushing:
 
 ```python
-GROQ_API_KEY  = "your_groq_api_key_here"
-GIPHY_API_KEY = "your_giphy_api_key_here"
+GROQ_API_KEY      = "your_groq_api_key_here"
+OPENAI_API_KEY    = "your_openai_api_key_here"
+ANTHROPIC_API_KEY = "your_anthropic_api_key_here"
+GEMINI_API_KEY    = "your_gemini_api_key_here"
+GIPHY_API_KEY     = "your_giphy_api_key_here"
 ```
+
+---
+
+## Roadmap
+
+Future goals for this project. Completed items are struck through.
+
+- [ ] Add multiple realistic AI-generated voices, produced **locally** (no cloud TTS dependency)
+- [ ] Add a beautiful interactive menu (TUI) built with JavaScript
+- [x] ~~Include more templates for cards~~ — 4 available: dark, light, minimal, immersive
 
 ---
 
