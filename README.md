@@ -16,7 +16,7 @@
 
 **AI-generated flashcards for any language** · example sentences · IPA · audio · animated GIFs · synonyms · gender · POS tags · interactive terminal UI
 
-[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Roadmap](#roadmap)
+[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [JavaScript TUI](#javascript-tui) · [Card Types](#card-types) · [Templates](#card-templates) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Roadmap](#roadmap)
 
 ---
 
@@ -139,6 +139,27 @@ All settings can be changed without touching any file:
     GIF               ON  |  rating: g
     Rate limits       AI 1.5s  Giphy 0.4s  TTS 0.3s
 ```
+
+---
+
+## JavaScript TUI
+
+A second, JS-based interactive menu lives in `cli/` — same screens as the
+Python curses menu above (Generate, Export, Configure, Statistics, Card type
+guide), rendered with Node's built-in `util.styleText` instead of curses.
+**Zero npm dependencies** — no `npm install` step. It's a pure frontend: every
+action shells out to `main.py` under the hood, so both menus always read and
+write the exact same `config.py` / `progress.db`.
+
+```
+cd cli
+node src/index.mjs
+```
+
+Requires Node.js ≥ 20.12 and `python3` on your `PATH` (set `PYTHON_BIN` to
+point at a different interpreter, e.g. a venv's). Controls are the same as
+the curses menu (`↑↓` navigate, `←→` change value, `Enter` select, `Esc`/`q`
+back).
 
 ---
 
@@ -305,7 +326,7 @@ GIPHY_API_KEY     = "your_giphy_api_key_here"
 Future goals for this project. Completed items are struck through.
 
 - [ ] Add multiple realistic AI-generated voices, produced **locally** (no cloud TTS dependency)
-- [ ] Add a beautiful interactive menu (TUI) built with JavaScript
+- [x] ~~Add a beautiful interactive menu (TUI) built with JavaScript~~ — see [JavaScript TUI](#javascript-tui)
 - [x] ~~Include more templates for cards~~ — 4 available: dark, light, minimal, immersive
 - [ ] Categorize cards into language-specific subfolders/subdecks (e.g. "Phrasal Verbs", "Verb Conjugation" for English) and track the category in Anki tags
 

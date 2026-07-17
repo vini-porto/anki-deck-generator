@@ -30,24 +30,37 @@ or overwriting manual edits the user has made inside Anki.
 
 ```
 anki-deck-generator/
-├── main.py              # Main script — all logic + interactive menu
+├── main.py              # Main script — all logic + interactive menu + CLI bridge flags
+├── tui.py               # Curses rendering layer for the Python interactive menu
 ├── config.py            # All user-configurable settings (API keys, language, etc.)
 ├── requirements.txt     # pip dependencies
 ├── CLAUDE.md            # This file
 ├── README.md            # GitHub documentation
 ├── .gitignore
-└── template/            # Note: folder is "template" (no 's'), import is "import template"
-    ├── __init__.py      # Loads and exposes all templates via tmpl_registry.load(name)
-    ├── dark.py          # Dark mode (Catppuccin Mocha palette) — default
-    ├── light.py         # Light mode with soft color accents
-    ├── minimal.py       # Text only, no GIF, no gender badge
-    └── immersive.py     # GIF as full card background with text overlay
+├── template/            # Note: folder is "template" (no 's'), import is "import template"
+│   ├── __init__.py      # Loads and exposes all templates via tmpl_registry.load(name)
+│   ├── dark.py          # Dark mode (Catppuccin Mocha palette) — default
+│   ├── light.py         # Light mode with soft color accents
+│   ├── minimal.py       # Text only, no GIF, no gender badge
+│   └── immersive.py     # GIF as full card background with text overlay
+└── cli/                 # JS TUI — a second frontend over main.py, see § JavaScript TUI
+    ├── package.json      # zero runtime dependencies
+    └── src/
+        ├── index.mjs      # entry point
+        ├── bridge.mjs     # subprocess wrapper around `python3 -B main.py --flag`
+        ├── ui.mjs         # raw-mode input loop, styling, banner, inline editor
+        ├── components.mjs # menu item classes (mirrors tui.py's MenuItem subclasses)
+        └── screens.mjs    # screen definitions (mirrors main.py's configure_* grouping)
 ```
 
 ## Running the script
 
 - **Interactive (default):** `python main.py` — shows the main menu
 - **Headless (automation/cron):** `python main.py --run` — generates + exports without menu
+- **Alternative JS frontend:** `cd cli && node src/index.mjs` — see § JavaScript TUI
+- **CLI bridge flags** (used by the JS TUI, but callable directly): `--generate`,
+  `--export[=<card_type>]`, `--stats-json`, `--config-json`, `--options-json`,
+  `--set-config=<KEY> --value=<VALUE> --type=<str|int|float|bool>`
 
 ---
 
@@ -302,3 +315,60 @@ DECK_NAME / DECK_OUTPUT_NEW / DECK_OUTPUT_FULL / DB_PATH / AUDIO_DIR
 DECK_ID / MODEL_ID              # stable Anki identifiers — never change after first run
 DELAY_AI / DELAY_GIPHY / DELAY_TTS  # rate limiting delays in seconds
 ```
+
+## JavaScript TUI
+
+`cli/` is a second, JS-based interactive menu with the same screens as
+`tui.py`'s curses menu. It is a **pure frontend** — it contains no business
+logic of its own (no AI calls, no SQLite, no .apkg writing) and instead
+shells out to `main.py` as a subprocess for everything, so both frontends
+always operate on the exact same `config.py` / `progress.db`. Zero npm
+dependencies: styling uses Node's built-in `util.styleText`, input uses
+`node:readline`'s raw-mode keypress events — no curses/blessed/Ink needed for
+what is fundamentally the same imperative redraw-on-keypress loop `tui.py`
+already implements with curses.
+
+**Bridge protocol** (`main.py`'s `_parse_flags()` / `_run_cli_bridge()`,
+consumed by `cli/src/bridge.mjs`):
+- `--generate` — runs `_do_generate(conn)` (the interactive generation loop
+  minus the trailing `pause()`) and returns.
+- `--export` / `--export=<card_type>` — runs `_do_export(conn, card_type)`
+  (export minus the interactive `select_card_type()` prompt and `pause()`);
+  omitting `=<card_type>` falls back to `config.CARD_TYPE`.
+- `--stats-json` — `_stats_data(conn)` as JSON (same figures as
+  `show_statistics()`, kept as a separate helper with its own queries rather
+  than refactoring the working curses screen).
+- `--config-json` — `_config_snapshot()`: every public primitive attribute of
+  `config` module, as JSON. Generic — reads whatever config.py currently
+  exposes, no key whitelist to keep in sync.
+- `--options-json` — `_options_snapshot()`: the static Picker option lists
+  already defined in main.py (`_AI_PROVIDERS`, `_GROQ_MODELS`,
+  `_ANTHROPIC_MODELS`, `_TEMPLATES`, `_CARD_TYPES`, `_CARD_TYPE_LABELS`,
+  `_GIF_RATINGS`) plus the provider lookup dicts (`AI_PROVIDER_LABELS`,
+  `AI_PROVIDER_MODEL_FIELD`, `AI_PROVIDER_KEY_FIELD`) — so the JS Picker
+  screens and banner never hardcode a second copy of this data.
+- `--set-config=<KEY> --value=<VALUE> --type=<str|int|float|bool>` — coerces
+  `VALUE` per `type` and calls the existing `write_config(key, value)`
+  unchanged.
+
+`Generate`/`Export` are invoked with `stdio: 'inherit'` so Python's own
+`col()`-colored progress output prints directly into the same terminal —
+this is the JS equivalent of `tui.py`'s `Action(print_mode=True)`
+curses-suspend pattern. `cli/src/bridge.mjs` always launches Python with
+`-B` (`python3 -B main.py ...`): config.py is rewritten by every
+`--set-config` call, and since Python's bytecode-cache invalidation is
+`(mtime, size)`-based, two writes with equal-length values within the same
+filesystem-mtime tick (e.g. rapid Left/Right presses on a NumberInput) can
+otherwise make a subsequent read see a stale cached module. `-B` forces a
+fresh read+compile from the real file on every invocation.
+
+Adding a new setting to a `configure_*` screen in `tui.py`? Add the matching
+item to the corresponding screen function in `cli/src/screens.mjs` too (same
+grouping: Language / AI & API / Deck & cards / Generation / Audio / GIF /
+Rate limits) — `_config_snapshot()` and `_options_snapshot()` already expose
+whatever main.py defines, so the JS side only needs the new menu item, not a
+new bridge flag (unless the setting needs a picker option list that isn't in
+`_options_snapshot()` yet, in which case add it there first).
+
+Run it: `cd cli && node src/index.mjs` (needs `python3` on `PATH`, or set
+`PYTHON_BIN` to a specific interpreter, e.g. a venv's).

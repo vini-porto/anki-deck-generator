@@ -854,6 +854,38 @@ def export_decks(conn, template, card_type=None):
 #  Menu screens
 # ─────────────────────────────────────────────
 
+def _stats_data(conn):
+    """Same figures as show_statistics(), as plain data for --stats-json."""
+    total     = conn.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
+    new_count = conn.execute("SELECT COUNT(*) FROM cards WHERE exported=0").fetchone()[0]
+    exported  = conn.execute("SELECT COUNT(*) FROM cards WHERE exported=1").fetchone()[0]
+
+    by_pos = conn.execute("""
+        SELECT pos, COUNT(*) AS cnt FROM cards
+        WHERE pos != ''
+        GROUP BY pos ORDER BY cnt DESC
+    """).fetchall()
+
+    recent_days = conn.execute("""
+        SELECT date_added, COUNT(*) FROM cards
+        GROUP BY date_added ORDER BY date_added DESC LIMIT 7
+    """).fetchall()
+
+    recent_exports = conn.execute("""
+        SELECT date, type, card_count FROM export_log
+        ORDER BY date DESC LIMIT 5
+    """).fetchall()
+
+    return {
+        "total": total,
+        "exported": exported,
+        "pending": new_count,
+        "by_pos": [{"pos": p, "count": c} for p, c in by_pos],
+        "recent_days": [{"date": d, "count": c} for d, c in recent_days],
+        "recent_exports": [{"date": d, "type": t, "count": c} for d, t, c in recent_exports],
+    }
+
+
 def show_statistics(conn):
     print_banner()
     print(col('  Statistics', 'bold', 'cyan'))
@@ -1007,6 +1039,23 @@ _GIF_RATINGS = [
     ("pg-13","PG-13"),
     ("r",    "R — least restrictive"),
 ]
+
+
+def _options_snapshot():
+    """Static picker option lists, as JSON, for alternative frontends
+    (e.g. the JS TUI in cli/) so they never hardcode a second copy."""
+    return {
+        "ai_providers":         _AI_PROVIDERS,
+        "groq_models":          _GROQ_MODELS,
+        "anthropic_models":     _ANTHROPIC_MODELS,
+        "templates":            _TEMPLATES,
+        "card_types":           _CARD_TYPES,
+        "card_type_labels":     _CARD_TYPE_LABELS,
+        "gif_ratings":          _GIF_RATINGS,
+        "provider_labels":      AI_PROVIDER_LABELS,
+        "provider_model_field": AI_PROVIDER_MODEL_FIELD,
+        "provider_key_field":   AI_PROVIDER_KEY_FIELD,
+    }
 
 
 def write_config(key, value):
@@ -1240,8 +1289,9 @@ def configure_main():
 #  Generation and export runners
 # ─────────────────────────────────────────────
 
-def run_generate(conn):
-    """Card generation loop (interactive)."""
+def _do_generate(conn):
+    """Card generation loop, printing but not pausing. Shared by the
+    interactive curses menu and the headless --generate CLI flag."""
     print_banner()
     print(col('  Generate New Cards', 'bold', 'cyan'))
     print(f'  {"─" * 52}')
@@ -1249,7 +1299,6 @@ def run_generate(conn):
     if ai_key_missing():
         field = AI_PROVIDER_KEY_FIELD.get(current_ai_provider(), "GROQ_API_KEY")
         print(col(f'\n  [ERROR] {field} not set in config.py', 'red'))
-        pause()
         return
 
     if config.ENABLE_GIF and config.GIPHY_API_KEY == "your_giphy_api_key_here":
@@ -1269,17 +1318,20 @@ def run_generate(conn):
     if not pending:
         print(col('  [WARN] Word pool exhausted!', 'yellow'))
         print(f'  Increase TOTAL_WORD_POOL in config.py (currently {config.TOTAL_WORD_POOL}).')
-        pause()
         return
 
     _generate_loop(conn, pending, config.WORDS_PER_RUN)
+
+
+def run_generate(conn):
+    """Card generation loop (interactive)."""
+    _do_generate(conn)
     pause()
 
 
-def run_export(conn):
-    """Card type selection + export."""
-    card_type = select_card_type()
-
+def _do_export(conn, card_type):
+    """Export decks for a given card type, printing but not pausing. Shared
+    by the interactive curses menu and the headless --export CLI flag."""
     print_banner()
     label = _CARD_TYPE_LABELS.get(card_type, card_type)
     print(col(f'  Exporting Decks  [{label}]', 'bold', 'cyan'))
@@ -1291,6 +1343,12 @@ def run_export(conn):
         export_decks(conn, template, card_type)
     except Exception as e:
         print(col(f'\n  [ERROR] Export failed: {e}', 'red'))
+
+
+def run_export(conn):
+    """Card type selection + export (interactive)."""
+    card_type = select_card_type()
+    _do_export(conn, card_type)
     pause()
 
 
@@ -1406,6 +1464,86 @@ def _generate_loop(conn, pending, limit):
 
 
 # ─────────────────────────────────────────────
+#  CLI bridge — JSON / headless flags for alternative frontends
+#  (e.g. the JS TUI in cli/). Kept additive: --run is unaffected.
+# ─────────────────────────────────────────────
+
+def _config_snapshot():
+    """Every public primitive setting in config.py, as JSON. Generic (reads
+    whatever config.py exposes) so it never drifts from the real settings."""
+    return {
+        k: getattr(config, k)
+        for k in dir(config)
+        if not k.startswith('_') and isinstance(getattr(config, k), (str, int, float, bool))
+    }
+
+
+def _coerce_value(raw, type_name):
+    if type_name == "bool":
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    if type_name == "int":
+        return int(raw)
+    if type_name == "float":
+        return float(raw)
+    return raw
+
+
+def _parse_flags(argv):
+    """Parse '--key=value' / bare '--key' tokens into a dict."""
+    flags = {}
+    for arg in argv:
+        if not arg.startswith('--'):
+            continue
+        key = arg[2:]
+        if '=' in key:
+            key, value = key.split('=', 1)
+            flags[key] = value
+        else:
+            flags[key] = True
+    return flags
+
+
+def _run_cli_bridge(flags):
+    """Handle a recognized bridge flag. Returns True if one was handled."""
+    if 'generate' in flags:
+        conn = init_db()
+        _do_generate(conn)
+        conn.close()
+        return True
+
+    if 'export' in flags:
+        card_type = flags['export'] if isinstance(flags['export'], str) else config.CARD_TYPE
+        conn = init_db()
+        _do_export(conn, card_type)
+        conn.close()
+        return True
+
+    if 'stats-json' in flags:
+        conn = init_db()
+        print(json.dumps(_stats_data(conn)))
+        conn.close()
+        return True
+
+    if 'config-json' in flags:
+        print(json.dumps(_config_snapshot()))
+        return True
+
+    if 'options-json' in flags:
+        print(json.dumps(_options_snapshot()))
+        return True
+
+    if 'set-config' in flags:
+        key       = flags['set-config']
+        raw       = flags.get('value', '')
+        type_name = flags.get('type', 'str')
+        ok = write_config(key, _coerce_value(raw, type_name))
+        print(json.dumps({"ok": ok}))
+        return True
+
+    return False
+
+
+# ─────────────────────────────────────────────
 #  Entry point
 # ─────────────────────────────────────────────
 
@@ -1453,6 +1591,10 @@ def _run_headless():
 def main():
     if "--run" in sys.argv:
         _run_headless()
+        return
+
+    flags = _parse_flags(sys.argv[1:])
+    if flags and _run_cli_bridge(flags):
         return
 
     conn = init_db()
