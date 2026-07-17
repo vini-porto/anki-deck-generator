@@ -114,6 +114,22 @@ CARD_TYPE = "type_answer"
 
 
 # ─────────────────────────────────────────────────────────────
+#  CATEGORIES / SUBDECKS
+#  Some languages have distinct study "blocks" beyond part of speech —
+#  e.g. English "Phrasal Verbs" or "Verb Conjugation". When enabled, the AI
+#  may tag a meaning with a short category label, which is then used to:
+#    - file the card into a "<DECK_NAME>::<Category>" subdeck in Anki
+#    - add a "topic::<Category>" tag alongside the existing vocab::<POS> tag
+#  Categories are language-specific and open-ended (not a fixed list) —
+#  new ones are only introduced when a meaning doesn't fit an existing one,
+#  and existing categories already in progress.db are reused by name.
+#  Set to False to disable — cards then only ever go in the root deck.
+# ─────────────────────────────────────────────────────────────
+
+ENABLE_CATEGORIES = True
+
+
+# ─────────────────────────────────────────────────────────────
 #  AUDIO
 #  ENABLE_AUDIO        : set False to skip all audio generation
 #                        (faster runs, smaller .apkg files)
