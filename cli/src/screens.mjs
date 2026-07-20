@@ -2,10 +2,30 @@
 // card-type picker, configure_* settings screens, statistics, card type
 // guide). Settings screens read/write config.py exclusively through the
 // bridge, never touching any file directly.
+//
+// Navigation shape: each function below owns one "page." Action/Back rows
+// return a token from runScreen(); the function's own while-loop (or a
+// single await, for leaf screens) decides what to show next.
 
 import { bridge } from './bridge.mjs';
-import { runMenu, enableRawMode, disableRawMode, clearScreen, paint, nextKey, renderBanner } from './ui.mjs';
-import { Action, Toggle, Picker, TextInput, NumberInput, Separator, Back } from './components.mjs';
+import { runScreen } from './runScreen.mjs';
+import { staticScreen } from './staticScreen.mjs';
+import { styles } from './theme.mjs';
+import { disableRawMode, enableRawMode, flushKeys } from './term.mjs';
+
+// Generate/export shell out to Python with inherited stdio — raw mode has
+// to step aside for that or keystrokes typed during the run get captured
+// by our own listener instead of just scrolling past in the terminal, and
+// buffer up as phantom navigation once the menu redraws.
+function runSubprocess(fn) {
+  disableRawMode();
+  try {
+    fn();
+  } finally {
+    enableRawMode();
+    flushKeys();
+  }
+}
 
 let _cfgStore = null;
 let _options = null;
@@ -36,18 +56,75 @@ function getCfgStore() {
   return _cfgStore;
 }
 
-function storeBinding() {
+// ── Item descriptor builders (plain objects consumed by runScreen/render) ─
+
+function toggleItem(label, key) {
   const store = getCfgStore();
-  return { getConfig: () => store.get(), setConfig: (k, v, t) => store.set(k, v, t) };
+  return {
+    kind: 'toggle',
+    label,
+    getValue: () => Boolean(store.get()[key]),
+    setValue: (v) => store.set(key, String(v), 'bool'),
+  };
 }
 
-function bannerData() {
+function pickerItem(label, key, options) {
+  const store = getCfgStore();
+  return {
+    kind: 'picker',
+    label,
+    options,
+    getValue: () => store.get()[key],
+    setValue: (v) => store.set(key, v, 'str'),
+  };
+}
+
+function textItem(label, key, { secret = false } = {}) {
+  const store = getCfgStore();
+  return {
+    kind: 'text',
+    label,
+    secret,
+    getValue: () => store.get()[key],
+    setValue: (v) => store.set(key, v, 'str'),
+  };
+}
+
+function numberItem(label, key, { minVal = 0, step = 1, isFloat = false } = {}) {
+  const store = getCfgStore();
+  return {
+    kind: 'number',
+    label,
+    minVal,
+    step,
+    isFloat,
+    getValue: () => store.get()[key],
+    setValue: (v) => store.set(key, String(v), isFloat ? 'float' : 'int'),
+  };
+}
+
+function actionItem(label, token, description) {
+  return { kind: 'action', label, token, description };
+}
+
+function backItem(label = 'Back') {
+  return { kind: 'back', label };
+}
+
+function separatorItem() {
+  return { kind: 'separator' };
+}
+
+// ── Shared header data ──────────────────────────────────────────────────
+
+function bannerSummary() {
   const cfg = getCfgStore().get();
   const options = getOptions();
   const provider = cfg.AI_PROVIDER;
   const providerLabel = options.provider_labels[provider] || provider;
   const modelField = options.provider_model_field[provider] || 'AI_MODEL';
-  return { cfg, providerLabel, currentModel: cfg[modelField] || '' };
+  const model = cfg[modelField] || '';
+  return `${String(cfg.SOURCE_LANG).toUpperCase()} -> ${cfg.TARGET_LANG}   ·   ${cfg.CARD_TEMPLATE} / ${cfg.CARD_TYPE}   ·   ${providerLabel} (${model})`;
 }
 
 function aiKeyMissing() {
@@ -60,253 +137,276 @@ function aiKeyMissing() {
 
 // ── Settings screens (mirrors main.py's configure_* functions) ─────────
 
-async function providerSettings() {
-  const sb = storeBinding();
+async function providerSettings(crumbs) {
   const options = getOptions();
   const provider = getCfgStore().get().AI_PROVIDER;
+  const trail = [...crumbs, 'Provider settings'];
 
+  let title;
+  let fields;
   if (provider === 'groq') {
-    await runMenu('Groq Settings', [
-      new Picker('AI model', 'AI_MODEL', options.groq_models, sb),
-      new TextInput('Groq API key', 'GROQ_API_KEY', { ...sb, secret: true }),
-      new Separator(),
-      new Back(),
-    ], bannerData);
+    title = 'Groq Settings';
+    fields = [pickerItem('AI model', 'AI_MODEL', options.groq_models), textItem('Groq API key', 'GROQ_API_KEY', { secret: true })];
   } else if (provider === 'openai') {
-    await runMenu('OpenAI Settings', [
-      new TextInput('AI model', 'OPENAI_MODEL', sb),
-      new TextInput('OpenAI API key', 'OPENAI_API_KEY', { ...sb, secret: true }),
-      new Separator(),
-      new Back(),
-    ], bannerData);
+    title = 'OpenAI Settings';
+    fields = [textItem('AI model', 'OPENAI_MODEL'), textItem('OpenAI API key', 'OPENAI_API_KEY', { secret: true })];
   } else if (provider === 'anthropic') {
-    await runMenu('Claude (Anthropic) Settings', [
-      new Picker('AI model', 'ANTHROPIC_MODEL', options.anthropic_models, sb),
-      new TextInput('Anthropic API key', 'ANTHROPIC_API_KEY', { ...sb, secret: true }),
-      new Separator(),
-      new Back(),
-    ], bannerData);
+    title = 'Claude (Anthropic) Settings';
+    fields = [
+      pickerItem('AI model', 'ANTHROPIC_MODEL', options.anthropic_models),
+      textItem('Anthropic API key', 'ANTHROPIC_API_KEY', { secret: true }),
+    ];
   } else if (provider === 'gemini') {
-    await runMenu('Gemini Settings', [
-      new TextInput('AI model', 'GEMINI_MODEL', sb),
-      new TextInput('Gemini API key', 'GEMINI_API_KEY', { ...sb, secret: true }),
-      new Separator(),
-      new Back(),
-    ], bannerData);
+    title = 'Gemini Settings';
+    fields = [textItem('AI model', 'GEMINI_MODEL'), textItem('Gemini API key', 'GEMINI_API_KEY', { secret: true })];
   } else {
-    await runMenu('Ollama Settings', [
-      new TextInput('AI model', 'OLLAMA_MODEL', sb),
-      new TextInput('Ollama server address', 'OLLAMA_HOST', sb),
-      new Separator(),
-      new Back(),
-    ], bannerData);
+    title = 'Ollama Settings';
+    fields = [textItem('AI model', 'OLLAMA_MODEL'), textItem('Ollama server address', 'OLLAMA_HOST')];
+  }
+
+  const items = [...fields, separatorItem(), backItem()];
+  await runScreen({ title, breadcrumb: trail, summary: bannerSummary(), items });
+}
+
+async function settingsAi(crumbs) {
+  const options = getOptions();
+  const trail = [...crumbs, 'AI & API'];
+  while (true) {
+    const cfg = getCfgStore().get();
+    const label = options.provider_labels[cfg.AI_PROVIDER] || cfg.AI_PROVIDER;
+    const modelField = options.provider_model_field[cfg.AI_PROVIDER] || 'AI_MODEL';
+    const model = cfg[modelField] || '';
+    const items = [
+      pickerItem('AI provider', 'AI_PROVIDER', options.ai_providers),
+      actionItem('Provider settings', 'provider', `${label}  |  ${model}` + (aiKeyMissing() ? '   ! key missing' : '')),
+      separatorItem(),
+      textItem('Giphy API key', 'GIPHY_API_KEY', { secret: true }),
+      separatorItem(),
+      backItem(),
+    ];
+    const choice = await runScreen({ title: 'AI & API Settings', breadcrumb: trail, summary: bannerSummary(), items });
+    if (choice === undefined || choice === 'back') return;
+    if (choice === 'provider') await providerSettings(trail);
   }
 }
 
-async function settingsAi() {
-  const sb = storeBinding();
+async function settingsLanguage(crumbs) {
+  const trail = [...crumbs, 'Language'];
+  const items = [
+    textItem('Language to learn', 'SOURCE_LANG'),
+    textItem('Native language', 'TARGET_LANG'),
+    textItem('TTS source lang (gTTS)', 'TTS_SOURCE_LANG'),
+    textItem('TTS native lang (gTTS)', 'TTS_TARGET_LANG'),
+    separatorItem(),
+    backItem(),
+  ];
+  await runScreen({ title: 'Language Settings', breadcrumb: trail, summary: bannerSummary(), items });
+}
+
+async function settingsDeck(crumbs) {
   const options = getOptions();
-  await runMenu('AI & API Settings', [
-    new Picker('AI provider', 'AI_PROVIDER', options.ai_providers, sb),
-    new Action('Provider settings', providerSettings, () => {
-      const cfg = getCfgStore().get();
-      const label = options.provider_labels[cfg.AI_PROVIDER] || cfg.AI_PROVIDER;
-      const modelField = options.provider_model_field[cfg.AI_PROVIDER] || 'AI_MODEL';
-      const model = cfg[modelField] || '';
-      return `${label}  |  ${model}` + (aiKeyMissing() ? '   ! key missing' : '');
-    }),
-    new Separator(),
-    new TextInput('Giphy API key', 'GIPHY_API_KEY', { ...sb, secret: true }),
-    new Separator(),
-    new Back(),
-  ], bannerData);
+  const trail = [...crumbs, 'Deck & cards'];
+  const items = [
+    textItem('Deck name', 'DECK_NAME'),
+    pickerItem('Card template', 'CARD_TEMPLATE', options.templates),
+    pickerItem('Card type', 'CARD_TYPE', options.card_types),
+    textItem('Output — new deck', 'DECK_OUTPUT_NEW'),
+    textItem('Output — full deck', 'DECK_OUTPUT_FULL'),
+    separatorItem(),
+    backItem(),
+  ];
+  await runScreen({ title: 'Deck & Card Settings', breadcrumb: trail, summary: bannerSummary(), items });
 }
 
-async function settingsLanguage() {
-  const sb = storeBinding();
-  await runMenu('Language Settings', [
-    new TextInput('Language to learn', 'SOURCE_LANG', sb),
-    new TextInput('Native language', 'TARGET_LANG', sb),
-    new TextInput('TTS source lang (gTTS)', 'TTS_SOURCE_LANG', sb),
-    new TextInput('TTS native lang (gTTS)', 'TTS_TARGET_LANG', sb),
-    new Separator(),
-    new Back(),
-  ], bannerData);
+async function settingsGeneration(crumbs) {
+  const trail = [...crumbs, 'Generation'];
+  const items = [
+    numberItem('Words per run', 'WORDS_PER_RUN', { minVal: 1, step: 5 }),
+    numberItem('Total word pool', 'TOTAL_WORD_POOL', { minVal: 100, step: 100 }),
+    separatorItem(),
+    backItem(),
+  ];
+  await runScreen({ title: 'Generation Settings', breadcrumb: trail, summary: bannerSummary(), items });
 }
 
-async function settingsDeck() {
-  const sb = storeBinding();
+async function settingsAudio(crumbs) {
+  const trail = [...crumbs, 'Audio'];
+  const items = [
+    toggleItem('Enable audio (master switch)', 'ENABLE_AUDIO'),
+    separatorItem(),
+    toggleItem('Word pronunciation audio', 'ENABLE_WORD_AUDIO'),
+    toggleItem('Example sentence audio', 'ENABLE_EXAMPLE_AUDIO'),
+    toggleItem('Meaning audio (native lang)', 'ENABLE_MEANING_AUDIO'),
+    separatorItem(),
+    backItem(),
+  ];
+  await runScreen({ title: 'Audio Settings', breadcrumb: trail, summary: bannerSummary(), items });
+}
+
+async function settingsGif(crumbs) {
   const options = getOptions();
-  await runMenu('Deck & Card Settings', [
-    new TextInput('Deck name', 'DECK_NAME', sb),
-    new Picker('Card template', 'CARD_TEMPLATE', options.templates, sb),
-    new Picker('Card type', 'CARD_TYPE', options.card_types, sb),
-    new TextInput('Output — new deck', 'DECK_OUTPUT_NEW', sb),
-    new TextInput('Output — full deck', 'DECK_OUTPUT_FULL', sb),
-    new Separator(),
-    new Back(),
-  ], bannerData);
+  const trail = [...crumbs, 'GIF'];
+  const items = [
+    toggleItem('Enable GIF (Giphy)', 'ENABLE_GIF'),
+    pickerItem('Content rating filter', 'GIF_RATING', options.gif_ratings),
+    separatorItem(),
+    backItem(),
+  ];
+  await runScreen({ title: 'GIF Settings', breadcrumb: trail, summary: bannerSummary(), items });
 }
 
-async function settingsGeneration() {
-  const sb = storeBinding();
-  await runMenu('Generation Settings', [
-    new NumberInput('Words per run', 'WORDS_PER_RUN', { ...sb, minVal: 1, step: 5 }),
-    new NumberInput('Total word pool', 'TOTAL_WORD_POOL', { ...sb, minVal: 100, step: 100 }),
-    new Separator(),
-    new Back(),
-  ], bannerData);
+async function settingsRateLimits(crumbs) {
+  const trail = [...crumbs, 'Rate limits'];
+  const items = [
+    numberItem('AI delay', 'DELAY_AI', { minVal: 0, step: 0.1, isFloat: true }),
+    numberItem('Giphy delay', 'DELAY_GIPHY', { minVal: 0, step: 0.1, isFloat: true }),
+    numberItem('gTTS delay', 'DELAY_TTS', { minVal: 0, step: 0.1, isFloat: true }),
+    separatorItem(),
+    backItem(),
+  ];
+  await runScreen({
+    title: 'Rate Limiting  (seconds between API calls)',
+    breadcrumb: trail,
+    summary: bannerSummary(),
+    items,
+  });
 }
 
-async function settingsAudio() {
-  const sb = storeBinding();
-  await runMenu('Audio Settings', [
-    new Toggle('Enable audio (master switch)', 'ENABLE_AUDIO', sb),
-    new Separator(),
-    new Toggle('Word pronunciation audio', 'ENABLE_WORD_AUDIO', sb),
-    new Toggle('Example sentence audio', 'ENABLE_EXAMPLE_AUDIO', sb),
-    new Toggle('Meaning audio (native lang)', 'ENABLE_MEANING_AUDIO', sb),
-    new Separator(),
-    new Back(),
-  ], bannerData);
+async function settingsMain(crumbs) {
+  const trail = [...crumbs, 'Settings'];
+  while (true) {
+    const items = [
+      actionItem('Language', 'language', () => {
+        const c = getCfgStore().get();
+        return `${String(c.SOURCE_LANG).toUpperCase()} -> ${c.TARGET_LANG}`;
+      }),
+      actionItem('AI & API keys', 'ai', () => {
+        const c = getCfgStore().get();
+        const label = getOptions().provider_labels[c.AI_PROVIDER] || c.AI_PROVIDER;
+        return label + (aiKeyMissing() ? '  ! key missing' : '');
+      }),
+      actionItem('Deck & cards', 'deck', () => {
+        const c = getCfgStore().get();
+        return `${c.CARD_TEMPLATE}  |  ${c.CARD_TYPE}`;
+      }),
+      actionItem('Generation', 'generation', () => {
+        const c = getCfgStore().get();
+        return `${c.WORDS_PER_RUN}/run   pool ${c.TOTAL_WORD_POOL}`;
+      }),
+      actionItem('Audio', 'audio', () => (getCfgStore().get().ENABLE_AUDIO ? 'ON' : 'OFF')),
+      actionItem('GIF', 'gif', () => {
+        const c = getCfgStore().get();
+        return `${c.ENABLE_GIF ? 'ON' : 'OFF'}  |  rating: ${c.GIF_RATING}`;
+      }),
+      actionItem('Rate limits', 'ratelimits', () => {
+        const c = getCfgStore().get();
+        return `AI ${c.DELAY_AI}s  Giphy ${c.DELAY_GIPHY}s  TTS ${c.DELAY_TTS}s`;
+      }),
+      separatorItem(),
+      backItem('Back to main menu'),
+    ];
+    const choice = await runScreen({ title: 'Configure Settings', breadcrumb: trail, summary: bannerSummary(), items });
+    if (choice === undefined || choice === 'back') return;
+    if (choice === 'language') await settingsLanguage(trail);
+    else if (choice === 'ai') await settingsAi(trail);
+    else if (choice === 'deck') await settingsDeck(trail);
+    else if (choice === 'generation') await settingsGeneration(trail);
+    else if (choice === 'audio') await settingsAudio(trail);
+    else if (choice === 'gif') await settingsGif(trail);
+    else if (choice === 'ratelimits') await settingsRateLimits(trail);
+  }
 }
 
-async function settingsGif() {
-  const sb = storeBinding();
-  const options = getOptions();
-  await runMenu('GIF Settings', [
-    new Toggle('Enable GIF (Giphy)', 'ENABLE_GIF', sb),
-    new Picker('Content rating filter', 'GIF_RATING', options.gif_ratings, sb),
-    new Separator(),
-    new Back(),
-  ], bannerData);
-}
+// ── Statistics & card type guide (static pages) ─────────────────────────
 
-async function settingsRateLimits() {
-  const sb = storeBinding();
-  await runMenu('Rate Limiting  (seconds between API calls)', [
-    new NumberInput('AI delay', 'DELAY_AI', { ...sb, minVal: 0, step: 0.1, isFloat: true }),
-    new NumberInput('Giphy delay', 'DELAY_GIPHY', { ...sb, minVal: 0, step: 0.1, isFloat: true }),
-    new NumberInput('gTTS delay', 'DELAY_TTS', { ...sb, minVal: 0, step: 0.1, isFloat: true }),
-    new Separator(),
-    new Back(),
-  ], bannerData);
-}
-
-async function settingsMain() {
-  await runMenu('Configure Settings', [
-    new Action('Language', settingsLanguage, () => {
-      const cfg = getCfgStore().get();
-      return `${String(cfg.SOURCE_LANG).toUpperCase()} -> ${cfg.TARGET_LANG}`;
-    }),
-    new Action('AI & API keys', settingsAi, () => {
-      const cfg = getCfgStore().get();
-      const label = getOptions().provider_labels[cfg.AI_PROVIDER] || cfg.AI_PROVIDER;
-      return label + (aiKeyMissing() ? '  ! key missing' : '');
-    }),
-    new Action('Deck & cards', settingsDeck, () => {
-      const cfg = getCfgStore().get();
-      return `${cfg.CARD_TEMPLATE}  |  ${cfg.CARD_TYPE}`;
-    }),
-    new Action('Generation', settingsGeneration, () => {
-      const cfg = getCfgStore().get();
-      return `${cfg.WORDS_PER_RUN}/run   pool ${cfg.TOTAL_WORD_POOL}`;
-    }),
-    new Action('Audio', settingsAudio, () => (getCfgStore().get().ENABLE_AUDIO ? 'ON' : 'OFF')),
-    new Action('GIF', settingsGif, () => {
-      const cfg = getCfgStore().get();
-      return `${cfg.ENABLE_GIF ? 'ON' : 'OFF'}  |  rating: ${cfg.GIF_RATING}`;
-    }),
-    new Action('Rate limits', settingsRateLimits, () => {
-      const cfg = getCfgStore().get();
-      return `AI ${cfg.DELAY_AI}s  Giphy ${cfg.DELAY_GIPHY}s  TTS ${cfg.DELAY_TTS}s`;
-    }),
-    new Separator(),
-    new Back('Back to main menu'),
-  ], bannerData);
-}
-
-// ── Statistics & card type guide (static prints, mirrors print_mode) ───
-
-async function showStatistics() {
+async function showStatistics(crumbs) {
   const stats = bridge.stats();
-  clearScreen();
-  process.stdout.write(renderBanner(bannerData()) + '\n\n');
-  process.stdout.write(paint('  Statistics', 'bold', 'cyan') + '\n');
-  process.stdout.write(paint('  ' + '─'.repeat(52), 'dim') + '\n\n');
+  const trail = [...crumbs, 'Statistics'];
+  const body = [];
 
-  process.stdout.write(`  Total cards     : ${paint(String(stats.total), 'yellow', 'bold')}\n`);
-  process.stdout.write(`  Exported        : ${paint(String(stats.exported), 'green')}\n`);
-  process.stdout.write(`  Pending export  : ${paint(String(stats.pending), 'cyan')}\n\n`);
+  body.push(`Total cards     : ${styles.warningBold.render(String(stats.total))}`);
+  body.push(`Exported        : ${styles.success.render(String(stats.exported))}`);
+  body.push(`Pending export  : ${styles.accent2.render(String(stats.pending))}`);
 
   if (stats.by_pos.length) {
-    process.stdout.write(paint('  By Part of Speech:', 'bold') + '\n');
+    body.push('', styles.bold.render('By Part of Speech:'));
     for (const { pos, count } of stats.by_pos) {
-      const bar = paint('█'.repeat(Math.min(count, 28)), 'blue');
-      process.stdout.write(`  ${(pos + ':').padEnd(16)} ${paint(String(count).padStart(4), 'yellow')}  ${bar}\n`);
+      const bar = '█'.repeat(Math.min(count, 28));
+      body.push(
+        `  ${(pos + ':').padEnd(16)} ${styles.warning.render(String(count).padStart(4))}  ${styles.accent2.render(bar)}`,
+      );
     }
-    process.stdout.write('\n');
   }
 
   if (stats.recent_days.length) {
-    process.stdout.write(paint('  Cards added (last 7 sessions):', 'bold') + '\n');
+    body.push('', styles.bold.render('Cards added (last 7 sessions):'));
     for (const { date, count } of stats.recent_days) {
-      process.stdout.write(`  ${date}   ${paint(count + ' cards', 'green')}\n`);
+      body.push(`  ${date}   ${styles.success.render(`${count} cards`)}`);
     }
-    process.stdout.write('\n');
   }
 
   if (stats.recent_exports.length) {
-    process.stdout.write(paint('  Recent exports:', 'bold') + '\n');
+    body.push('', styles.bold.render('Recent exports:'));
     for (const { date, type, count } of stats.recent_exports) {
-      process.stdout.write(`  ${date.slice(0, 16)}  ${String(type).padEnd(22)}  ${paint(count + ' cards', 'cyan')}\n`);
+      body.push(
+        `  ${date.slice(0, 16)}  ${String(type).padEnd(22)}  ${styles.accent2.render(`${count} cards`)}`,
+      );
     }
-    process.stdout.write('\n');
   }
 
-  process.stdout.write(paint('  Press any key to continue...', 'dim') + '\n');
-  await nextKey();
+  await staticScreen({ title: 'Statistics', breadcrumb: trail, summary: bannerSummary(), body });
 }
 
 const CARD_TYPE_INFO = [
-  ['Basic', [
-    'The classic format. Front shows the word, IPA,',
-    'GIF and example sentence. Back reveals the meaning.',
-    'Best for recognition practice.',
-  ]],
-  ['Basic + Reversed', [
-    'Creates 2 Anki cards per note. Card 1 is the usual',
-    'word->meaning. Card 2 flips it: you see the English',
-    'definition and must recall the foreign word.',
-  ]],
-  ['Type in Answer', [
-    'Front shows the meaning and the example in your native',
-    'language. You TYPE the foreign word. Anki checks your',
-    'spelling and highlights any mistakes.',
-  ]],
-  ['Cloze', [
-    'The example sentence is shown with the target word',
-    'blanked out: "Elle est tres ___."  You fill the gap.',
-    'Great for learning words in context.',
-  ]],
+  [
+    'Basic',
+    [
+      'The classic format. Front shows the word, IPA,',
+      'GIF and example sentence. Back reveals the meaning.',
+      'Best for recognition practice.',
+    ],
+  ],
+  [
+    'Basic + Reversed',
+    [
+      'Creates 2 Anki cards per note. Card 1 is the usual',
+      'word->meaning. Card 2 flips it: you see the English',
+      'definition and must recall the foreign word.',
+    ],
+  ],
+  [
+    'Type in Answer',
+    [
+      'Front shows the meaning and the example in your native',
+      'language. You TYPE the foreign word. Anki checks your',
+      'spelling and highlights any mistakes.',
+    ],
+  ],
+  [
+    'Cloze',
+    [
+      'The example sentence is shown with the target word',
+      'blanked out: "Elle est tres ___."  You fill the gap.',
+      'Great for learning words in context.',
+    ],
+  ],
 ];
 
-async function showCardTypeGuide() {
-  clearScreen();
-  process.stdout.write(renderBanner(bannerData()) + '\n\n');
-  process.stdout.write(paint('  Card Types — How They Work', 'bold', 'cyan') + '\n');
-  process.stdout.write(paint('  ' + '─'.repeat(52), 'dim') + '\n');
+async function showCardTypeGuide(crumbs) {
+  const trail = [...crumbs, 'Card type guide'];
+  const body = [];
   CARD_TYPE_INFO.forEach(([title, lines], i) => {
-    process.stdout.write(`\n  ${paint(`[${i + 1}] ${title}`, 'yellow', 'bold')}\n`);
-    for (const line of lines) process.stdout.write(`      ${paint(line, 'dim')}\n`);
+    if (i > 0) body.push('');
+    body.push(styles.warningBold.render(`[${i + 1}] ${title}`));
+    for (const line of lines) body.push(styles.muted.render('    ' + line));
   });
-  process.stdout.write('\n' + paint('  Press any key to continue...', 'dim') + '\n');
-  await nextKey();
+  await staticScreen({ title: 'Card Types — How They Work', breadcrumb: trail, summary: bannerSummary(), body });
 }
 
 // ── Export flow: JS-native card-type picker, then delegate to Python ───
 
-async function runExportFlow() {
+async function runExportFlow(crumbs) {
+  const trail = [...crumbs, 'Export decks'];
   const cfg = getCfgStore().get();
   const choices = [
     ['basic', 'Basic', 'Word -> Meaning  |  Classic recognition card'],
@@ -316,37 +416,42 @@ async function runExportFlow() {
     [null, 'Use config.py default', `Current value: ${cfg.CARD_TYPE}`],
   ];
 
-  let chosen;
-  const items = choices.map(
-    ([value, label, desc]) => new Action(label, () => { chosen = value; return 'back'; }, desc),
-  );
-  items.push(new Separator(), new Back('Cancel'));
+  const items = [
+    ...choices.map(([, label, desc], i) => actionItem(label, `type:${i}`, desc)),
+    separatorItem(),
+    backItem('Cancel'),
+  ];
 
-  await runMenu('Select Card Type for Export', items, bannerData);
-  if (chosen === undefined) return; // cancelled via Back/Esc
+  const choice = await runScreen({ title: 'Select Card Type for Export', breadcrumb: trail, summary: bannerSummary(), items });
+  if (choice === undefined || choice === 'back') return;
 
-  disableRawMode();
-  bridge.export(chosen || undefined);
-  enableRawMode();
+  const cardType = choices[Number(choice.split(':')[1])][0];
+  runSubprocess(() => bridge.export(cardType || undefined));
 }
 
 // ── Main menu ────────────────────────────────────────────────────────
 
 export async function mainMenu() {
-  await runMenu('Main Menu', [
-    new Action('Generate new cards', async () => {
-      disableRawMode();
-      bridge.generate();
-      enableRawMode();
-    }, () => `Up to ${getCfgStore().get().WORDS_PER_RUN} words from the frequency list`),
-    new Action('Export decks', runExportFlow, 'Build .apkg  —  choose card type before exporting'),
-    new Action('Configure', settingsMain, () => {
-      const cfg = getCfgStore().get();
-      return `${String(cfg.SOURCE_LANG).toUpperCase()} -> ${cfg.TARGET_LANG}`;
-    }),
-    new Action('Statistics', showStatistics, 'Card counts, POS breakdown, export history'),
-    new Action('Card type guide', showCardTypeGuide, 'Basic / Reversed / Type / Cloze'),
-    new Separator(),
-    new Back('Exit'),
-  ], bannerData);
+  const crumbs = ['Main Menu'];
+  while (true) {
+    const items = [
+      actionItem('Generate new cards', 'generate', () => `Up to ${getCfgStore().get().WORDS_PER_RUN} words from the frequency list`),
+      actionItem('Export decks', 'export', 'Build .apkg  —  choose card type before exporting'),
+      actionItem('Configure', 'configure', () => {
+        const c = getCfgStore().get();
+        return `${String(c.SOURCE_LANG).toUpperCase()} -> ${c.TARGET_LANG}`;
+      }),
+      actionItem('Statistics', 'stats', 'Card counts, POS breakdown, export history'),
+      actionItem('Card type guide', 'guide', 'Basic / Reversed / Type / Cloze'),
+      separatorItem(),
+      backItem('Exit'),
+    ];
+    const choice = await runScreen({ title: 'Main Menu', breadcrumb: crumbs, summary: bannerSummary(), items });
+    if (choice === undefined || choice === 'back') break;
+    if (choice === 'generate') runSubprocess(() => bridge.generate());
+    else if (choice === 'export') await runExportFlow(crumbs);
+    else if (choice === 'configure') await settingsMain(crumbs);
+    else if (choice === 'stats') await showStatistics(crumbs);
+    else if (choice === 'guide') await showCardTypeGuide(crumbs);
+  }
 }

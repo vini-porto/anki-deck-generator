@@ -1,12 +1,15 @@
 {
   "name": "anki-deck-generator-tui",
-  "version": "1.0.0",
-  "description": "Arrow-key JS terminal UI for the Anki Vocabulary Deck Generator — a thin frontend over main.py, zero runtime dependencies.",
+  "version": "3.0.0",
+  "description": "Lip Gloss-styled terminal UI for the Anki Vocabulary Deck Generator — a thin frontend over main.py.",
   "private": true,
   "type": "module",
   "main": "src/index.mjs",
   "scripts": {
     "start": "node src/index.mjs"
+  },
+  "dependencies": {
+    "@charmland/lipgloss": "^2.0.0-beta.3"
   },
   "engines": {
     "node": ">=20.12.0"
