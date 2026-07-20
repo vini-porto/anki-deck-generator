@@ -3,7 +3,7 @@
 // strings (built by screens.mjs via theme.mjs helpers).
 
 import { nextKey, isExitCombo, clearScreen } from './term.mjs';
-import { buildHeader, buildFooter } from './render.mjs';
+import { buildHeader, buildFooter, frame } from './render.mjs';
 import { styles } from './theme.mjs';
 
 export async function staticScreen({ title, breadcrumb = [], summary = '', body = [] }) {
@@ -17,7 +17,7 @@ export async function staticScreen({ title, breadcrumb = [], summary = '', body 
     '',
     buildFooter(['Press any key to continue']),
   ];
-  process.stdout.write(lines.join('\n') + '\n');
+  process.stdout.write(frame(lines));
 
   const key = await nextKey();
   if (isExitCombo(key)) {

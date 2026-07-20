@@ -148,10 +148,12 @@ A second, JS-based interactive menu lives in `cli/` — same screens as the
 Python curses menu above (Generate, Export, Configure, Statistics, Card type
 guide), styled with [Lip Gloss](https://github.com/charmbracelet/lipgloss)
 (via `@charmland/lipgloss`, Charm's own WASM build of the real Go library)
-for a modern look — gradient title, breadcrumb navigation, no boxed ASCII
-banner. It's a pure frontend: every action shells out to `main.py` under the
-hood, so both menus always read and write the exact same `config.py` /
-`progress.db`.
+for a modern look inspired by Lip Gloss's own showcase demo: a solid violet
+title banner in bold white text, breadcrumb navigation on a dark status bar,
+a hot-pink caret chip and highlight band marking the focused row, and footer
+key hints rendered as small colored badges instead of plain text. It's a
+pure frontend: every action shells out to `main.py` under the hood, so both
+menus always read and write the exact same `config.py` / `progress.db`.
 
 ```
 cd cli
