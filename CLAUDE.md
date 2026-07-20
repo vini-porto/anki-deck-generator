@@ -95,6 +95,8 @@ used to set the GIF as a CSS background via JavaScript.
 Table: `cards`
 - `id`, `word`, `word_label`, `meaning_id` — identity
 - `pos`, `ipa`, `gender` — linguistic metadata
+- `category` — language-specific study-block label (e.g. "Phrasal Verbs"), empty
+  string for ordinary vocabulary — see § Category / subdeck organization
 - `text_meaning`, `text_example_phrase`, `text_example_translation`, `synonyms` — text content
 - `audio_word`, `audio_meaning`, `audio_example` — paths to MP3 files in audio_files/
 - `gif_url` (HTML img tag), `gif_raw_url` (plain URL)
@@ -182,37 +184,46 @@ or create Filtered Decks (e.g. "study only verbs today").
 POS strings from the AI are normalized via the `pos_to_tag()` function
 using the `POS_TAG_MAP` dictionary in main.py.
 
+Cards with a category also get a `topic::<Category>` tag (e.g.
+`topic::Phrasal_Verbs`), slugified via `category_to_tag()` — see
+§ Category / subdeck organization.
+
 ---
 
-## Planned: category/subfolder organization (not yet implemented)
+## Category / subdeck organization
 
-**Problem:** POS tagging (`vocab::Noun`, `vocab::Verb`) is language-agnostic, but
-many languages have study "blocks" that don't map to POS at all and vary from
-language to language — e.g. English has "Phrasal Verbs" and "Verb Conjugation";
-other languages may have their own distinct groupings (French might warrant
-"Faux Amis", Japanese might warrant "Keigo", etc.). There's currently no way to
-register or reuse these categories, so each language's real study structure
-isn't reflected in the deck.
+**Problem it solves:** POS tagging (`vocab::Noun`, `vocab::Verb`) is
+language-agnostic, but many languages have study "blocks" that don't map to
+POS at all and vary from language to language — e.g. English has "Phrasal
+Verbs" and "Verb Conjugation"; other languages may have their own distinct
+groupings (French might warrant "Faux Amis", Japanese might warrant "Keigo").
 
-**Direction for implementation** (for whoever picks this up):
-- A `category` (or `subcategory`) concept per card, similar to `pos` — likely a
-  new `cards.category` column added via the existing soft-migration pattern in
-  `init_db()`, populated either by extending the AI JSON response schema
-  (`PROMPT_TEMPLATE` in main.py) with a `category` field per meaning, or by a
-  user-maintained mapping.
-- Categories are **language-specific and open-ended** — unlike `POS_TAG_MAP`
-  (a small fixed set), there's no universal list. Whatever registry is built
-  should let categories be defined/extended per `SOURCE_LANG` rather than
-  hardcoded once for all languages, and should persist so a category coined for
-  one run is recognized and reused on later runs instead of drifting into
-  near-duplicate names.
-- **Anki tags** are the natural place to surface this (mirrors the existing
-  `vocab::<POS>` scheme) — likely `vocab::<POS>::<Category>` or a parallel
-  `topic::<Category>` tag, so filtering/Filtered Decks keep working. Actual
-  Anki **subdecks** are a separate, heavier option (`genanki` supports deck
-  hierarchy via `"Parent::Child"` deck names) — tags are the lower-risk default
-  since `export_decks()` currently assumes one flat deck per DECK_ID; decide
-  based on how the user wants to browse/study rather than defaulting to decks.
+**How it works:**
+- `cards.category` — a soft-migrated column (like `pos`/`gender`), one per
+  card/meaning, populated by the AI as an extra field in the same JSON response
+  (`PROMPT_TEMPLATE` in main.py). Empty string means ordinary vocabulary with
+  no special category.
+- **Categories are language-specific and open-ended** — unlike `POS_TAG_MAP`
+  (a small fixed set), there's no hardcoded list. `get_known_categories(conn)`
+  reads every distinct category already stored in `progress.db` and
+  `_build_category_hint()` feeds that list back into the prompt so the AI
+  reuses an existing name (exact spelling/casing) instead of coining a
+  near-duplicate; `_generate_loop()` also appends newly-coined categories to
+  the in-memory list as it goes so reuse works within a single run, not just
+  across runs.
+- **Anki tags** — `build_notes()` adds a `topic::<Category>` tag (slugified via
+  `category_to_tag()`) alongside the existing `vocab::<POS>` tag.
+- **Anki subdecks** — `export_decks()` routes each `(category, note)` pair
+  (`build_notes()` returns notes as `(category, Note)` tuples) through
+  `_build_deck_tree()`, which creates one `genanki.Deck` per category named
+  `"<DECK_NAME>::<Category>"` (Anki's `::` subdeck syntax) plus the root deck
+  for uncategorized cards, then bundles them all into one `genanki.Package`.
+  `category_deck_id()` derives a stable subdeck ID from a CRC32 hash of the
+  category name (offset from the root DECK_ID) so re-running the generator
+  doesn't spawn duplicate subdecks in Anki.
+- `config.ENABLE_CATEGORIES` (default `True`) is the master switch — when
+  `False`, the AI isn't asked for a category, and even a category already
+  stored in the DB is ignored at export time (no subdeck, no `topic::` tag).
 
 ---
 
@@ -230,6 +241,13 @@ Two .apkg files are generated on every run:
 
 Both files use the same Anki model (MODEL_ID) but different DECK_IDs
 (DECK_ID for full, DECK_ID + 1 for new) to avoid conflicts on import.
+
+Each file is actually a small **deck tree**, not a single flat deck: cards
+with a `category` are routed into a `"<DECK_NAME>::<Category>"` subdeck via
+`_build_deck_tree()`, alongside the root deck for uncategorized cards. The
+"new" tree and "full" tree derive their subdeck IDs from different base IDs
+(DECK_ID vs DECK_ID + 1), so both stay independently stable across runs — see
+§ Category / subdeck organization.
 
 ---
 
@@ -311,6 +329,7 @@ WORDS_PER_RUN                   # new words per script execution
 TOTAL_WORD_POOL                 # total frequency pool size
 CARD_TEMPLATE                   # "dark" | "light" | "minimal" | "immersive"
 CARD_TYPE                       # "basic" | "basic_reversed" | "type_answer" | "cloze"
+ENABLE_CATEGORIES               # category subdecks + topic:: tags (see Category / subdeck organization)
 ENABLE_AUDIO / ENABLE_GIF       # toggle features on/off
 ENABLE_WORD_AUDIO / ENABLE_EXAMPLE_AUDIO / ENABLE_MEANING_AUDIO
 GIF_RATING                      # Giphy content filter: "g" | "pg" | "pg-13"
