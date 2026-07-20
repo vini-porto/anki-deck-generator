@@ -4,7 +4,7 @@
 // place. Owns an inline text-edit sub-mode for Text/Number rows.
 
 import { nextKeyBatch, isExitCombo, clearScreen } from './term.mjs';
-import { buildHeader, buildFooter, buildRow, buildEditBox } from './render.mjs';
+import { buildHeader, buildFooter, buildRow, buildEditBox, frame } from './render.mjs';
 import { styles } from './theme.mjs';
 
 function firstSelectable(items) {
@@ -32,7 +32,7 @@ export async function runScreen({ title, breadcrumb = [], summary = '', items })
     clearScreen();
     const lines = [buildHeader({ breadcrumb, summary }), '', styles.accentBold.render(title), ''];
     for (let i = 0; i < items.length; i++) {
-      lines.push('  ' + buildRow(items[i], i === focused && !editing));
+      lines.push(buildRow(items[i], i === focused && !editing));
     }
     if (editing) {
       lines.push('', buildEditBox(items[focused].label, editBuffer.join(''), editCursor, items[focused].secret));
@@ -41,7 +41,7 @@ export async function runScreen({ title, breadcrumb = [], summary = '', items })
       '',
       buildFooter(editing ? ['Enter confirm', 'Esc cancel'] : ['↑↓ Navigate', 'Enter Select', '←→ Adjust', 'Esc Back']),
     );
-    process.stdout.write(lines.join('\n') + '\n');
+    process.stdout.write(frame(lines));
   }
 
   async function cyclePicker(item, direction) {
