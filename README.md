@@ -146,13 +146,16 @@ All settings can be changed without touching any file:
 
 A second, JS-based interactive menu lives in `cli/` — same screens as the
 Python curses menu above (Generate, Export, Configure, Statistics, Card type
-guide), rendered with Node's built-in `util.styleText` instead of curses.
-**Zero npm dependencies** — no `npm install` step. It's a pure frontend: every
-action shells out to `main.py` under the hood, so both menus always read and
-write the exact same `config.py` / `progress.db`.
+guide), styled with [Lip Gloss](https://github.com/charmbracelet/lipgloss)
+(via `@charmland/lipgloss`, Charm's own WASM build of the real Go library)
+for a modern look — gradient title, breadcrumb navigation, no boxed ASCII
+banner. It's a pure frontend: every action shells out to `main.py` under the
+hood, so both menus always read and write the exact same `config.py` /
+`progress.db`.
 
 ```
 cd cli
+npm install
 node src/index.mjs
 ```
 

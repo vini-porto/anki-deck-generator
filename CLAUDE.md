@@ -44,20 +44,23 @@ anki-deck-generator/
 │   ├── minimal.py       # Text only, no GIF, no gender badge
 │   └── immersive.py     # GIF as full card background with text overlay
 └── cli/                 # JS TUI — a second frontend over main.py, see § JavaScript TUI
-    ├── package.json      # zero runtime dependencies
+    ├── package.json      # deps: @charmland/lipgloss (WASM build of Go's charmbracelet/lipgloss)
     └── src/
-        ├── index.mjs      # entry point
-        ├── bridge.mjs     # subprocess wrapper around `python3 -B main.py --flag`
-        ├── ui.mjs         # raw-mode input loop, styling, banner, inline editor
-        ├── components.mjs # menu item classes (mirrors tui.py's MenuItem subclasses)
-        └── screens.mjs    # screen definitions (mirrors main.py's configure_* grouping)
+        ├── index.mjs        # entry point
+        ├── bridge.mjs       # subprocess wrapper around `python3 -B main.py --flag`
+        ├── term.mjs         # raw-mode keypress capture (readline), queued so no key is ever dropped
+        ├── theme.mjs        # Lip Gloss Style singletons + precomputed gradient title
+        ├── render.mjs       # pure string builders: header/footer/row-per-item-kind/edit-box
+        ├── runScreen.mjs    # the interactive list loop (focus, editing, keypress dispatch)
+        ├── staticScreen.mjs # read-only page loop (Statistics, Card type guide)
+        └── screens.mjs      # screen definitions (mirrors main.py's configure_* grouping)
 ```
 
 ## Running the script
 
 - **Interactive (default):** `python main.py` — shows the main menu
 - **Headless (automation/cron):** `python main.py --run` — generates + exports without menu
-- **Alternative JS frontend:** `cd cli && node src/index.mjs` — see § JavaScript TUI
+- **Alternative JS frontend:** `cd cli && npm install && node src/index.mjs` — see § JavaScript TUI
 - **CLI bridge flags** (used by the JS TUI, but callable directly): `--generate`,
   `--export[=<card_type>]`, `--stats-json`, `--config-json`, `--options-json`,
   `--set-config=<KEY> --value=<VALUE> --type=<str|int|float|bool>`
@@ -322,11 +325,52 @@ DELAY_AI / DELAY_GIPHY / DELAY_TTS  # rate limiting delays in seconds
 `tui.py`'s curses menu. It is a **pure frontend** — it contains no business
 logic of its own (no AI calls, no SQLite, no .apkg writing) and instead
 shells out to `main.py` as a subprocess for everything, so both frontends
-always operate on the exact same `config.py` / `progress.db`. Zero npm
-dependencies: styling uses Node's built-in `util.styleText`, input uses
-`node:readline`'s raw-mode keypress events — no curses/blessed/Ink needed for
-what is fundamentally the same imperative redraw-on-keypress loop `tui.py`
-already implements with curses.
+always operate on the exact same `config.py` / `progress.db`.
+
+Styling is built on [Lip Gloss](https://github.com/charmbracelet/lipgloss)
+via `@charmland/lipgloss` — Charm's own WASM build of the real Go source
+(not a reimplementation; its npm maintainers list is the actual Charm team).
+Two prior attempts at this same feature preceded this one: a hand-rolled
+zero-dependency ANSI menu that mirrored `tui.py`'s curses visual language
+byte-for-byte (looked like a straight port, not a modern UI), then an
+Ink+React rebuild that looked right but rendered with no color at all in
+the user's real terminal (Konsole) due to Ink/chalk's color-support
+detection misfiring. Lip Gloss does its own color-profile detection
+(`DetectFromEnvVars`, real Go `termenv` logic) — different code path,
+independent of whatever Ink/chalk got wrong.
+
+Lip Gloss is styling-only, like the Go original — no input loop or screen
+model (that's Bubble Tea's job in Go, and there's no JS Bubble Tea here). So
+this is a hand-rolled raw-mode keypress loop (`cli/src/term.mjs`, via
+`node:readline`), same shape as the original zero-dependency attempt, with
+Lip Gloss building the styled strings instead of manual ANSI. `cli/src/
+theme.mjs` holds the palette and a **fixed set of pre-built `Style`
+singletons** — deliberately never `new Style()` per redraw. The WASM side
+has its own Go GC with no visibility into JS reachability; a Style object
+that goes out of scope in JS can get collected out from under a still-cached
+handle, which surfaced as a real `"type assert failed"` WASM panic under a
+redraw loop that minted a fresh Style per row per keystroke. A second,
+related crash (`"table index is out of bounds"`) showed up when several
+redraws fired within milliseconds of each other (e.g. arrow-key
+auto-repeat) — `term.mjs`'s `nextKeyBatch()` drains a whole burst of queued
+keys and `runScreen.mjs` applies all of them before a single redraw, instead
+of one redraw per key. Both fixes were confirmed against a scripted
+pseudo-TTY stress test (rapid up/down and left/right bursts) before being
+considered done — this is beta software (`2.0.0-beta.3`); if new Lip Gloss
+methods get used here later, re-run that kind of burst test rather than
+assuming stability.
+
+**Navigation**: `runScreen.mjs` is a plain async function (not a component
+tree) that owns one screen's focus/editing state and redraw loop, returning
+a token once an Action/Back row is chosen. `screens.mjs`'s functions
+(`mainMenu`, `settingsMain`, etc.) drive navigation via sequential `await
+runScreen(...)` calls — same shape as `tui.py`'s nested `run_menu()` calls
+reusing one curses window. Items are plain descriptors (`{kind: 'action'|
+'toggle'|'picker'|'text'|'number'|'separator'|'back', ...}`) built by
+helpers in `screens.mjs` (`actionItem`, `toggleItem`, `pickerItem`,
+`textItem`, `numberItem`) — Action/Back rows return their token, ending the
+screen; Toggle/Picker/Text/Number rows mutate config in place via
+`getValue()`/`setValue()` closures and redraw the same screen.
 
 **Bridge protocol** (`main.py`'s `_parse_flags()` / `_run_cli_bridge()`,
 consumed by `cli/src/bridge.mjs`):
@@ -354,7 +398,14 @@ consumed by `cli/src/bridge.mjs`):
 `Generate`/`Export` are invoked with `stdio: 'inherit'` so Python's own
 `col()`-colored progress output prints directly into the same terminal —
 this is the JS equivalent of `tui.py`'s `Action(print_mode=True)`
-curses-suspend pattern. `cli/src/bridge.mjs` always launches Python with
+curses-suspend pattern. Unlike the settings screens, raw mode here is a
+single session-long `enableRawMode()` in `index.mjs`, not per-screen — so
+`screens.mjs`'s `runSubprocess()` helper explicitly calls
+`disableRawMode()` before `bridge.generate()`/`bridge.export()` and
+`enableRawMode()` + `flushKeys()` after, so keystrokes typed while Python
+has the terminal don't get captured by our own listener and replayed as
+phantom navigation once the menu redraws. `cli/src/bridge.mjs` always
+launches Python with
 `-B` (`python3 -B main.py ...`): config.py is rewritten by every
 `--set-config` call, and since Python's bytecode-cache invalidation is
 `(mtime, size)`-based, two writes with equal-length values within the same
@@ -363,12 +414,13 @@ otherwise make a subsequent read see a stale cached module. `-B` forces a
 fresh read+compile from the real file on every invocation.
 
 Adding a new setting to a `configure_*` screen in `tui.py`? Add the matching
-item to the corresponding screen function in `cli/src/screens.mjs` too (same
+item descriptor (via `toggleItem`/`pickerItem`/`textItem`/`numberItem`) to
+the corresponding screen function in `cli/src/screens.mjs` too (same
 grouping: Language / AI & API / Deck & cards / Generation / Audio / GIF /
 Rate limits) — `_config_snapshot()` and `_options_snapshot()` already expose
 whatever main.py defines, so the JS side only needs the new menu item, not a
 new bridge flag (unless the setting needs a picker option list that isn't in
 `_options_snapshot()` yet, in which case add it there first).
 
-Run it: `cd cli && node src/index.mjs` (needs `python3` on `PATH`, or set
-`PYTHON_BIN` to a specific interpreter, e.g. a venv's).
+Run it: `cd cli && npm install && node src/index.mjs` (needs `python3` on
+`PATH`, or set `PYTHON_BIN` to a specific interpreter, e.g. a venv's).
