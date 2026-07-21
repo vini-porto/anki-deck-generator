@@ -119,4 +119,15 @@ function renderBanner(text, bgHex, hPad = 3) {
   return [blankRow, textRow, blankRow].join('\n');
 }
 
-export const TITLE_BANNER = renderBanner('Anki Vocabulary Deck Generator', HEX.accent);
+// `let`, not `const` — the version isn't known yet at module load (it comes
+// from the --options-json bridge call, which screens.mjs makes lazily), so
+// this starts unversioned and setAppVersion() reassigns it once, right
+// after that first bridge round-trip and before the first draw(). ES module
+// imports are live bindings, so render.mjs's `import { TITLE_BANNER }` sees
+// the updated value automatically — no need to thread it through
+// buildHeader()'s call sites.
+export let TITLE_BANNER = renderBanner('Anki Vocabulary Deck Generator', HEX.accent);
+
+export function setAppVersion(version) {
+  TITLE_BANNER = renderBanner(`Anki Vocabulary Deck Generator  v${version}`, HEX.accent);
+}

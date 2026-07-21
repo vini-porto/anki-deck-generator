@@ -1,6 +1,6 @@
 {
   "name": "anki-deck-generator-tui",
-  "version": "3.0.0",
+  "version": "2.3.0",
   "description": "Lip Gloss-styled terminal UI for the Anki Vocabulary Deck Generator — a thin frontend over main.py.",
   "private": true,
   "type": "module",

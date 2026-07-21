@@ -3,8 +3,9 @@
 This file gives you full context about the project so you can assist
 with new features, refactoring, and bug fixes effectively.
 
-Current version: **v2.0** (branch: `v2-interactive-menu`)
-Changes from v1: interactive menu, 4 card types, statistics screen, settings view.
+Current version: tracked in `VERSION` (repo root) — see `CHANGELOG.md` for
+history and § Versioning below for how/when to bump it. Do not hardcode a
+version number here; it will only go stale again.
 
 ---
 
@@ -271,6 +272,34 @@ with a `category` are routed into a `"<DECK_NAME>::<Category>"` subdeck via
 
 - **No emojis in terminal output.** All status messages use plain text prefixes:
   [OK], [WARN], [ERROR], [INFO], [AUDIO], [GIF], [SKIP], [DONE].
+
+---
+
+## Versioning
+
+`VERSION` (repo root, plain text, e.g. `2.3.0`) is the single source of
+truth for the project's release version — `version.py` reads it and exposes
+`APP_VERSION`, which both `main.py` (headless banner, `--options-json`
+bridge output) and `tui.py` (menu title) import rather than hardcoding a
+number. The JS TUI reads it from the bridge's `app_version` field
+(`cli/src/screens.mjs`'s `mainMenu()` calls `theme.mjs`'s `setAppVersion()`
+once at startup) and `cli/package.json`'s own `version` field is kept in
+sync by hand — there is one project version, not per-frontend versions.
+
+**Bump `VERSION` and add a `CHANGELOG.md` entry on every user-facing
+change** (follow [Semantic Versioning](https://semver.org/)):
+- **PATCH** (`x.y.Z`) — bug fixes, small visual/UX tweaks, internal
+  refactors with no new capability.
+- **MINOR** (`x.Y.0`) — new backward-compatible features (a new provider,
+  a new card type, a new screen).
+- **MAJOR** (`X.0.0`) — breaking changes or a fundamentally redesigned
+  experience (e.g. the original curses-menu rewrite).
+
+Never hand-edit the version number in `README.md`'s badge, `tui.py`, or
+`main.py` directly — change `VERSION` and everything else follows from it.
+Update the README badge text to match `VERSION` after bumping (it's a
+static `img.shields.io` badge, not generated at build time, so it doesn't
+update itself).
 
 ---
 

@@ -1,6 +1,7 @@
 """
 =============================================================
-  Anki Vocabulary Deck Generator  v2.0
+  Anki Vocabulary Deck Generator
+  (version tracked in VERSION / CHANGELOG.md — see version.py)
   Generates rich Anki flashcards for any language using
   AI-generated content (Groq), animated GIFs (Giphy),
   and text-to-speech audio (gTTS).
@@ -38,6 +39,7 @@ from gtts import gTTS
 from wordfreq import top_n_list
 
 import config
+import version as _version
 import template as tmpl_registry
 
 
@@ -86,7 +88,7 @@ def _row(text=''):
 
 def print_banner():
     _clear()
-    title    = col('  Anki Vocabulary Deck Generator  v2.0  ', 'bold', 'cyan')
+    title    = col(f'  Anki Vocabulary Deck Generator  v{_version.APP_VERSION}  ', 'bold', 'cyan')
     lang     = col(f'  Language : {config.SOURCE_LANG.upper()} -> {config.TARGET_LANG}', 'yellow')
     tmpl     = col(f'  Template : {config.CARD_TEMPLATE}   |   Card type : {config.CARD_TYPE}', 'dim')
     provider = AI_PROVIDER_LABELS.get(current_ai_provider(), current_ai_provider())
@@ -1158,6 +1160,7 @@ def _options_snapshot():
     """Static picker option lists, as JSON, for alternative frontends
     (e.g. the JS TUI in cli/) so they never hardcode a second copy."""
     return {
+        "app_version":          _version.APP_VERSION,
         "ai_providers":         _AI_PROVIDERS,
         "groq_models":          _GROQ_MODELS,
         "anthropic_models":     _ANTHROPIC_MODELS,
@@ -1672,7 +1675,7 @@ def _run_cli_bridge(flags):
 def _run_headless():
     """Non-interactive mode: generate + export without a menu (--run flag)."""
     print("=" * 60)
-    print("  Anki Vocabulary Deck Generator  v2.0  [headless]")
+    print(f"  Anki Vocabulary Deck Generator  v{_version.APP_VERSION}  [headless]")
     print(f"  Language : {config.SOURCE_LANG.upper()}  |  "
           f"Template : {config.CARD_TEMPLATE}  |  "
           f"Card type : {config.CARD_TYPE}  |  "

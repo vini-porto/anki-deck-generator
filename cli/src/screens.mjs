@@ -10,7 +10,7 @@
 import { bridge } from './bridge.mjs';
 import { runScreen } from './runScreen.mjs';
 import { staticScreen } from './staticScreen.mjs';
-import { styles } from './theme.mjs';
+import { styles, setAppVersion } from './theme.mjs';
 import { disableRawMode, enableRawMode, flushKeys } from './term.mjs';
 
 // Generate/export shell out to Python with inherited stdio — raw mode has
@@ -432,6 +432,7 @@ async function runExportFlow(crumbs) {
 // ── Main menu ────────────────────────────────────────────────────────
 
 export async function mainMenu() {
+  setAppVersion(getOptions().app_version);
   const crumbs = ['Main Menu'];
   while (true) {
     const items = [

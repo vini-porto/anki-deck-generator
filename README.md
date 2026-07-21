@@ -8,6 +8,7 @@
             AI-powered Anki flashcard deck generator
 ```
 
+[![Version](https://img.shields.io/badge/version-2.3.0-blueviolet?style=flat-square)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![AI](https://img.shields.io/badge/AI-Groq%20%7C%20OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama-orange?style=flat-square)](https://console.groq.com)
@@ -16,7 +17,7 @@
 
 **AI-generated flashcards for any language** · example sentences · IPA · audio · animated GIFs · synonyms · gender · POS tags · interactive terminal UI
 
-[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Categories & Subdecks](#categories--subdecks) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Roadmap](#roadmap)
+[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Categories & Subdecks](#categories--subdecks) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Versioning](#versioning) · [Roadmap](#roadmap)
 
 ---
 
@@ -352,6 +353,24 @@ ANTHROPIC_API_KEY = "your_anthropic_api_key_here"
 GEMINI_API_KEY    = "your_gemini_api_key_here"
 GIPHY_API_KEY     = "your_giphy_api_key_here"
 ```
+
+---
+
+## Versioning
+
+The current release — **v2.3.0** — is tracked in a single `VERSION` file at
+the repo root, so it never drifts between the two frontends. Both
+interactive menus read it from there and show it in their title banner (the
+curses menu via `tui.py`, the JS TUI via the `--options-json` bridge flag),
+and this README's version badge is updated alongside it.
+
+Releases follow [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`:
+
+- **MAJOR** — breaking changes or a fundamentally redesigned experience
+- **MINOR** — new backward-compatible features
+- **PATCH** — fixes and small refinements
+
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 ---
 
