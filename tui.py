@@ -7,6 +7,7 @@ Falls back gracefully if the terminal does not support curses.
 
 import curses
 import config as _cfg
+import version as _version
 
 # ─────────────────────────────────────────────
 #  Color pair registry
@@ -58,7 +59,7 @@ def _draw_banner(win):
         border = '═' * max(0, w - 2)
         win.addstr(0, 0, ('╔' + border + '╗')[:w], _cp('cyan'))
 
-        title = '  Anki Vocabulary Deck Generator  v2.0'
+        title = f'  Anki Vocabulary Deck Generator  v{_version.APP_VERSION}'
         win.addstr(1, 0, '║', _cp('cyan'))
         win.addstr(1, 1, title.ljust(w - 2)[:w - 2], _cp('title') | curses.A_BOLD)
         win.addstr(1, w - 1, '║', _cp('cyan'))
