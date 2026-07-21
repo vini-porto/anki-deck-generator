@@ -379,6 +379,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 Future goals for this project. Completed items are struck through.
 
 - [ ] Add multiple realistic AI-generated voices, produced **locally** (no cloud TTS dependency)
+- [ ] Add [AnkiConnect](https://ankiweb.net/shared/info/2055492159) support to export/import cards directly into a running Anki instance, without producing a `.apkg` file first — offered **alongside** the existing `.apkg` export, not replacing it
 - [x] ~~Add a beautiful interactive menu (TUI) built with JavaScript~~ — see [JavaScript TUI](#javascript-tui)
 - [x] ~~Include more templates for cards~~ — 4 available: dark, light, minimal, immersive
 - [x] ~~Categorize cards into language-specific subfolders/subdecks (e.g. "Phrasal Verbs", "Verb Conjugation" for English) and track the category in Anki tags~~ — see [Categories & subdecks](#categories--subdecks)
