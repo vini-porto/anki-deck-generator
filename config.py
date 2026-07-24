@@ -50,7 +50,13 @@ GIPHY_API_KEY     = "your_giphy_api_key_here"
 AI_MODEL        = "llama-3.3-70b-versatile"  # used when AI_PROVIDER = "groq"
 OPENAI_MODEL    = "gpt-4o-mini"              # used when AI_PROVIDER = "openai"
 ANTHROPIC_MODEL = "claude-haiku-4-5"         # used when AI_PROVIDER = "anthropic"
-GEMINI_MODEL    = "gemini-2.0-flash"         # used when AI_PROVIDER = "gemini"
+# Google's free tier drops/adds model access periodically — as of this
+# writing, gemini-2.0-flash and gemini-1.5-flash have 0 free-tier quota
+# (some 404 outright); gemini-2.5-flash-lite is the current free-tier-
+# friendly choice. If this provider starts returning HTTP 429 "limit: 0"
+# errors, check https://ai.google.dev/gemini-api/docs/rate-limits and
+# swap to whatever's currently free.
+GEMINI_MODEL    = "gemini-2.5-flash-lite"    # used when AI_PROVIDER = "gemini"
 OLLAMA_MODEL    = "llama3.1"                 # used when AI_PROVIDER = "ollama"
 OLLAMA_HOST     = "http://localhost:11434"   # Ollama server address
 

@@ -390,7 +390,11 @@ def ai_key_missing():
 PROMPT_TEMPLATE = """You are a language expert creating Anki flashcard content \
 for {target_lang} speakers learning {source_lang}.
 
-For the word "{word}", generate flashcard data for ALL its distinct and relevant meanings.
+For the word "{word}", generate flashcard data for its distinct and relevant meanings — at \
+most the 5 most common and useful ones for a learner (fewer if the word doesn't have that many). \
+Extremely common function/grammar words (e.g. articles, prepositions, auxiliary verbs) can have \
+dozens of technical senses; do not enumerate all of them — pick the handful that are actually \
+worth a separate flashcard.
 
 Return ONLY a valid JSON object (no markdown, no explanation) with this exact structure:
 {{
@@ -426,6 +430,7 @@ Example for someone teasing: ['teasing', 'laughing', 'school']."]
 
 Rules:
 - Only include meanings that are genuinely distinct and useful for a language learner
+- Never return more than 5 meanings, even for words with many technical senses
 - The example sentence must clearly illustrate the specific meaning listed
 - Synonyms must be in {source_lang}
 - IPA must be standard {source_lang} IPA notation
@@ -451,7 +456,7 @@ def _call_groq(prompt):
     payload = {
         "model":       config.AI_MODEL,
         "temperature": 0.3,
-        "max_tokens":  1024,
+        "max_tokens":  2048,
         "messages":    [{"role": "user", "content": prompt}],
     }
     resp = requests.post(GROQ_URL, headers=AI_HEADERS, json=payload, timeout=30)
@@ -469,7 +474,7 @@ def _call_openai(prompt):
     payload = {
         "model":       config.OPENAI_MODEL,
         "temperature": 0.3,
-        "max_tokens":  1024,
+        "max_tokens":  2048,
         "messages":    [{"role": "user", "content": prompt}],
     }
     resp = requests.post(OPENAI_URL, headers=headers, json=payload, timeout=30)
@@ -488,40 +493,133 @@ def _call_anthropic(prompt):
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     response = client.messages.create(
         model=config.ANTHROPIC_MODEL,
-        max_tokens=1024,
+        max_tokens=2048,
         messages=[{"role": "user", "content": prompt}],
     )
     return next((b.text for b in response.content if b.type == "text"), "")
+
+
+def _gemini_retry_delay(resp):
+    """Seconds to wait before retrying, per Google's own RetryInfo detail on
+    a 429 response — respecting the server's own backoff signal instead of
+    guessing, since Gemini's free tier enforces both per-minute and per-day
+    quotas and only the server knows which one was hit."""
+    try:
+        details = resp.json().get("error", {}).get("details", [])
+    except ValueError:
+        return None
+    for d in details:
+        if d.get("@type", "").endswith("RetryInfo"):
+            delay = d.get("retryDelay", "")
+            if delay.endswith("s"):
+                try:
+                    return float(delay[:-1])
+                except ValueError:
+                    return None
+    return None
+
+
+def _gemini_post_with_retry(url, payload, max_retries=3):
+    """POST to Gemini, retrying on 429 (rate limit) with the server's own
+    suggested backoff. Returns the final response, whatever its status —
+    the caller still has to handle non-200/non-429 outcomes."""
+    attempt = 0
+    while True:
+        resp = requests.post(
+            url, params={"key": config.GEMINI_API_KEY}, json=payload, timeout=30
+        )
+        if resp.status_code != 429 or attempt >= max_retries:
+            return resp
+        wait = _gemini_retry_delay(resp) or (5 * (attempt + 1))
+        print(col(f"    [Gemini] Rate limited (429) — waiting {wait:.0f}s before "
+                   f"retry {attempt + 1}/{max_retries}...", 'yellow'))
+        time.sleep(wait)
+        attempt += 1
 
 
 def _call_gemini(prompt):
     url = GEMINI_URL_TMPL.format(model=config.GEMINI_MODEL)
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024},
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
     }
-    resp = requests.post(
-        url, params={"key": config.GEMINI_API_KEY}, json=payload, timeout=30
-    )
+    resp = _gemini_post_with_retry(url, payload)
+    if resp.status_code == 429:
+        print(col(
+            "    [Gemini] Still rate-limited after retrying — the free tier's "
+            "quota (per-minute or per-day) is exhausted. Wait a bit, raise "
+            "DELAY_AI in config.py, or switch AI_PROVIDER temporarily.", 'red'))
+        return None
     if resp.status_code != 200:
-        print(f"    [Gemini] HTTP {resp.status_code}: {resp.text[:200]}")
+        print(f"    [Gemini] HTTP {resp.status_code}: {resp.text[:300]}")
         return None
-    candidates = resp.json().get("candidates", [])
+    data = resp.json()
+    candidates = data.get("candidates", [])
     if not candidates:
+        block_reason = data.get("promptFeedback", {}).get("blockReason")
+        print(col(f"    [Gemini] Prompt blocked: {block_reason}" if block_reason
+                   else f"    [Gemini] No candidates returned: {json.dumps(data)[:300]}", 'yellow'))
         return None
-    parts = candidates[0].get("content", {}).get("parts", [])
-    return "".join(p.get("text", "") for p in parts)
+    candidate = candidates[0]
+    parts = candidate.get("content", {}).get("parts", [])
+    text = "".join(p.get("text", "") for p in parts)
+    if not text:
+        print(col(f"    [Gemini] Empty response (finishReason="
+                   f"{candidate.get('finishReason', 'UNKNOWN')})", 'yellow'))
+        return None
+    return text
+
+
+def _ollama_model_pulled(model):
+    """True if `model` is already pulled locally. Hitting /api/chat with a
+    model that isn't pulled yet makes some Ollama versions silently start
+    downloading it in the background — with stream=False that download
+    produces zero output until it's fully done, which looks indistinguishable
+    from the script hanging (this is the #1 real cause behind "generation
+    gets stuck and doesn't move" reports). Checking first turns that into an
+    immediate, actionable error instead."""
+    try:
+        resp = requests.get(f"{config.OLLAMA_HOST.rstrip('/')}/api/tags", timeout=5)
+        if resp.status_code != 200:
+            return True  # can't tell — don't block generation on this check
+        pulled = {m.get("name", "").split(":")[0] for m in resp.json().get("models", [])}
+        return model.split(":")[0] in pulled
+    except requests.exceptions.RequestException:
+        return True  # unreachable — let the real call below surface that error
 
 
 def _call_ollama(prompt):
-    url = f"{config.OLLAMA_HOST.rstrip('/')}/api/chat"
+    host = config.OLLAMA_HOST.rstrip('/')
+    if not _ollama_model_pulled(config.OLLAMA_MODEL):
+        print(col(
+            f"    [Ollama] '{config.OLLAMA_MODEL}' isn't pulled yet on {host} — run "
+            f"`ollama pull {config.OLLAMA_MODEL}` first, then try again.", 'yellow'))
+        return None
+
+    print(col(f"    [Ollama] Waiting on {config.OLLAMA_MODEL} — local CPU inference "
+               f"can take a while, this is normal...", 'dim'))
     payload = {
         "model":    config.OLLAMA_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "stream":   False,
         "options":  {"temperature": 0.3},
     }
-    resp = requests.post(url, json=payload, timeout=120)
+    try:
+        # (connect timeout, read timeout) — connect fails fast if `ollama serve`
+        # isn't running; read is generous since unaccelerated local inference of
+        # a ~1000-token structured response can legitimately take minutes.
+        resp = requests.post(f"{host}/api/chat", json=payload, timeout=(10, 300))
+    except requests.exceptions.ConnectTimeout:
+        print(col(f"    [Ollama] Can't reach {host} — is `ollama serve` running?", 'red'))
+        return None
+    except requests.exceptions.ConnectionError:
+        print(col(f"    [Ollama] Connection refused at {host} — is `ollama serve` running "
+                   f"and OLLAMA_HOST correct?", 'red'))
+        return None
+    except requests.exceptions.ReadTimeout:
+        print(col(f"    [Ollama] No response after 5 minutes — '{config.OLLAMA_MODEL}' may be "
+                   f"too large/slow for this machine. Try a smaller model.", 'red'))
+        return None
     if resp.status_code != 200:
         print(f"    [Ollama] HTTP {resp.status_code}: {resp.text[:200]}")
         return None
@@ -1390,7 +1488,7 @@ def configure_ai():
         elif provider == "gemini":
             _tui.run_menu('Gemini Settings', [
                 _tui.TextInput('AI model', 'GEMINI_MODEL',
-                               hint='e.g. gemini-2.0-flash  gemini-1.5-flash  gemini-1.5-pro'),
+                               hint='e.g. gemini-2.5-flash-lite  gemini-2.5-flash  (free tier shifts often)'),
                 _tui.TextInput('Gemini API key', 'GEMINI_API_KEY', secret=True,
                                hint='Get yours at aistudio.google.com/apikey'),
                 _tui.Separator(),
@@ -1503,7 +1601,7 @@ def configure_gif():
 
 def configure_ratelimits():
     _tui.run_menu('Rate Limiting  (seconds between API calls)', [
-        _tui.NumberInput('Groq AI delay', 'DELAY_AI',    min_val=0.0, step=0.1, is_float=True),
+        _tui.NumberInput('AI delay',      'DELAY_AI',    min_val=0.0, step=0.1, is_float=True),
         _tui.NumberInput('Giphy delay',   'DELAY_GIPHY', min_val=0.0, step=0.1, is_float=True),
         _tui.NumberInput('gTTS delay',    'DELAY_TTS',   min_val=0.0, step=0.1, is_float=True),
         _tui.Separator(),
