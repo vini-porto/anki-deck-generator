@@ -399,9 +399,12 @@ Return ONLY a valid JSON object (no markdown, no explanation) with this exact st
     {{
       "pos": "part of speech in English (Noun / Verb / Adjective / Adverb / etc.)",
       "gender": "For nouns only: 'Masculine' or 'Feminine'. Empty string for all other parts of speech.",
-      "text_meaning": "A single clear sentence in {target_lang} explaining this meaning. \
-Start with 'To [word] means...' for verbs, 'If something/someone is [word]...' for adjectives, \
-or '[Word] is/refers to...' for nouns. Keep it concise like a dictionary entry.",
+      "text_meaning": "A single clear sentence written ENTIRELY in {target_lang} explaining this \
+meaning. Do NOT include the {source_lang} word/term itself anywhere in this sentence — it is \
+already shown separately on the card with its own {source_lang} audio, so repeating it here \
+would mix two languages in a single sentence and sound wrong when read aloud. Refer to it only \
+implicitly: 'Means to ...' for verbs, 'Describes something/someone that is ...' for adjectives, \
+'Refers to ...' or 'A type of ...' for nouns. Keep it concise like a real dictionary entry.",
       "text_example_phrase": "A natural sentence in {source_lang} (10-15 words) using the word \
 in this specific meaning. Make it vivid and memorable with real context.",
       "text_example_translation": "The {target_lang} translation of the example sentence above. \
@@ -428,6 +431,8 @@ Rules:
 - IPA must be standard {source_lang} IPA notation
 - gif_keywords must be exactly 3 English single words
 - gender must be 'Masculine' or 'Feminine' for nouns only, empty string otherwise
+- text_meaning must be written entirely in {target_lang} — never include the literal \
+{source_lang} word/term being defined, since that would mix languages inside its own audio
 - text_example_translation must be a natural {target_lang} translation of the example
 - category must reuse an existing category exactly (same spelling/casing) whenever it fits, \
 must be an empty string for ordinary vocabulary, and should only introduce a new category when \
