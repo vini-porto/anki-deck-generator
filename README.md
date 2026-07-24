@@ -8,7 +8,7 @@
             AI-powered Anki flashcard deck generator
 ```
 
-[![Version](https://img.shields.io/badge/version-2.4.0-blueviolet?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.4.1-blueviolet?style=flat-square)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![AI](https://img.shields.io/badge/AI-Groq%20%7C%20OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama-orange?style=flat-square)](https://console.groq.com)
@@ -339,7 +339,7 @@ TTS_TARGET_LANG  = "en"        # gTTS code for native language audio
 AI_MODEL        = "llama-3.3-70b-versatile"  # used when AI_PROVIDER = "groq"
 OPENAI_MODEL    = "gpt-4o-mini"              # used when AI_PROVIDER = "openai"
 ANTHROPIC_MODEL = "claude-haiku-4-5"         # used when AI_PROVIDER = "anthropic"
-GEMINI_MODEL    = "gemini-2.0-flash"         # used when AI_PROVIDER = "gemini"
+GEMINI_MODEL    = "gemini-2.5-flash-lite"    # used when AI_PROVIDER = "gemini" (free tier shifts often)
 OLLAMA_MODEL    = "llama3.1"                 # used when AI_PROVIDER = "ollama"
 OLLAMA_HOST     = "http://localhost:11434"   # local Ollama server address
 
@@ -400,7 +400,7 @@ GIPHY_API_KEY     = "your_giphy_api_key_here"
 
 ## Versioning
 
-The current release — **v2.4.0** — is tracked in a single `VERSION` file at
+The current release — **v2.4.1** — is tracked in a single `VERSION` file at
 the repo root, so it never drifts between the two frontends. Both
 interactive menus read it from there and show it in their title banner (the
 curses menu via `tui.py`, the JS TUI via the `--options-json` bridge flag),
@@ -420,6 +420,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 Future goals for this project. Completed items are struck through.
 
+- [ ] Add multiple card creation modes beyond the current word-to-meaning + audio mode — e.g. phrase-and-context mode, audio-to-meaning mode, audio-to-writing mode, etc. Modes that don't fit the existing POS/category organization should still center on one highlighted word
+- [ ] Let the user choose how exhaustively meanings are generated per word — all possible meanings, only the most important ones, or just the essential one(s) — instead of the current fixed cap
 - [x] ~~Add multiple realistic AI-generated voices, produced **locally** (no cloud TTS dependency)~~ — see [Local TTS (Pocket TTS)](#local-tts-pocket-tts)
 - [ ] Add [AnkiConnect](https://ankiweb.net/shared/info/2055492159) support to export/import cards directly into a running Anki instance, without producing a `.apkg` file first — offered **alongside** the existing `.apkg` export, not replacing it
 - [x] ~~Add a beautiful interactive menu (TUI) built with JavaScript~~ — see [JavaScript TUI](#javascript-tui)

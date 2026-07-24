@@ -13,6 +13,14 @@ shown in the README badge and in both interactive menus.
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-07-24
+### Fixed
+- `Text_Meaning` no longer embeds the raw source-language word inside the
+  native-language definition sentence (the AI prompt previously instructed
+  it to open with e.g. "To [word] means..."). That mixed two languages in
+  one sentence, which sounded wrong when read aloud by `Sound_Meaning`'s
+  single-language TTS voice. Only affects newly generated cards.
+
 ## [2.4.0] - 2026-07-24
 ### Added
 - Local, offline text-to-speech via [Pocket TTS](https://github.com/kyutai-labs/pocket-tts)
