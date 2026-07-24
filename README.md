@@ -8,7 +8,7 @@
             AI-powered Anki flashcard deck generator
 ```
 
-[![Version](https://img.shields.io/badge/version-2.3.0-blueviolet?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.4.0-blueviolet?style=flat-square)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![AI](https://img.shields.io/badge/AI-Groq%20%7C%20OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama-orange?style=flat-square)](https://console.groq.com)
@@ -17,7 +17,7 @@
 
 **AI-generated flashcards for any language** · example sentences · IPA · audio · animated GIFs · synonyms · gender · POS tags · interactive terminal UI
 
-[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Categories & Subdecks](#categories--subdecks) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Versioning](#versioning) · [Roadmap](#roadmap)
+[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Categories & Subdecks](#categories--subdecks) · [Local TTS](#local-tts-pocket-tts) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Versioning](#versioning) · [Roadmap](#roadmap)
 
 ---
 
@@ -81,6 +81,9 @@ Plus GIFs:
 
 > Using **Anthropic/Claude**? Also run `pip install anthropic` — it's an optional
 > dependency not installed by `requirements.txt` by default.
+
+> Want **local, offline audio** instead of gTTS? Set `TTS_PROVIDER = "pocket_tts"`
+> and run `pip install pocket-tts` — see [Local TTS (Pocket TTS)](#local-tts-pocket-tts).
 
 ### 5. Run
 ```bash
@@ -266,6 +269,40 @@ deck, with no `topic::` tag.
 
 ---
 
+## Local TTS (Pocket TTS)
+
+By default, audio is generated via **gTTS** — a free cloud API with one
+generic voice per language. As a local, offline alternative, you can switch
+to [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) (Kyutai Labs), a
+CPU-only engine with multiple realistic AI-generated voices:
+
+```bash
+pip install pocket-tts
+```
+
+```python
+TTS_PROVIDER             = "pocket_tts"  # "gtts" | "pocket_tts"
+POCKET_TTS_VOICE_SOURCE  = "alba"        # voice for word + example audio
+POCKET_TTS_VOICE_TARGET  = "alba"        # voice for meaning audio
+POCKET_TTS_QUANTIZE      = False         # less RAM, faster, no quality loss
+```
+
+Or from the menu: **Configure → Audio → TTS provider → Pocket TTS settings**.
+
+**Things to know:**
+- Runs entirely on CPU — no GPU, no API key, no per-request network call.
+- The **first** time a language is used, its model weights are downloaded
+  from Hugging Face and cached in `~/.cache/pocket_tts/` — that's the only
+  network access; every run after that is fully offline.
+- Only ships models for **English, French, German, Italian, Portuguese, and
+  Spanish**. If `TTS_SOURCE_LANG`/`TTS_TARGET_LANG` is anything else (e.g.
+  Japanese, Russian), that field automatically falls back to gTTS with a
+  one-time `[WARN]` — the rest keeps using Pocket TTS.
+- English has 21 voices to choose from; every other supported language
+  currently ships exactly one.
+
+---
+
 ## Supported languages
 
 Any language supported by [wordfreq](https://github.com/rspeer/wordfreq).
@@ -319,6 +356,11 @@ ENABLE_WORD_AUDIO    = True
 ENABLE_EXAMPLE_AUDIO = True
 ENABLE_MEANING_AUDIO = True
 
+TTS_PROVIDER            = "gtts"   # gtts | pocket_tts (local — see Local TTS)
+POCKET_TTS_VOICE_SOURCE = "alba"   # voice for word + example audio
+POCKET_TTS_VOICE_TARGET = "alba"   # voice for meaning audio
+POCKET_TTS_QUANTIZE     = False    # less RAM, faster, no quality loss
+
 ENABLE_GIF = True              # fetch animated GIFs from Giphy
 GIF_RATING = "g"               # g | pg | pg-13 | r
 
@@ -336,7 +378,7 @@ DELAY_TTS   = 0.3              # seconds between gTTS calls
 | `deck_new.apkg` | **Import this daily** — new cards only |
 | `deck_full.apkg` | Full backup of all cards ever generated |
 | `progress.db` | SQLite database tracking all processed words |
-| `audio_files/` | Generated MP3 files (embedded in the .apkg) |
+| `audio_files/` | Generated audio files (MP3 via gTTS, WAV via Pocket TTS — embedded in the .apkg) |
 
 ---
 
@@ -358,7 +400,7 @@ GIPHY_API_KEY     = "your_giphy_api_key_here"
 
 ## Versioning
 
-The current release — **v2.3.0** — is tracked in a single `VERSION` file at
+The current release — **v2.4.0** — is tracked in a single `VERSION` file at
 the repo root, so it never drifts between the two frontends. Both
 interactive menus read it from there and show it in their title banner (the
 curses menu via `tui.py`, the JS TUI via the `--options-json` bridge flag),
@@ -378,7 +420,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 Future goals for this project. Completed items are struck through.
 
-- [ ] Add multiple realistic AI-generated voices, produced **locally** (no cloud TTS dependency)
+- [x] ~~Add multiple realistic AI-generated voices, produced **locally** (no cloud TTS dependency)~~ — see [Local TTS (Pocket TTS)](#local-tts-pocket-tts)
 - [ ] Add [AnkiConnect](https://ankiweb.net/shared/info/2055492159) support to export/import cards directly into a running Anki instance, without producing a `.apkg` file first — offered **alongside** the existing `.apkg` export, not replacing it
 - [x] ~~Add a beautiful interactive menu (TUI) built with JavaScript~~ — see [JavaScript TUI](#javascript-tui)
 - [x] ~~Include more templates for cards~~ — 4 available: dark, light, minimal, immersive

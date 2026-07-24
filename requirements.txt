@@ -5,3 +5,6 @@ requests
 
 # Only needed if AI_PROVIDER = "anthropic" in config.py
 # anthropic
+
+# Only needed if TTS_PROVIDER = "pocket_tts" in config.py
+# pocket-tts

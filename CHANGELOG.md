@@ -13,6 +13,14 @@ shown in the README badge and in both interactive menus.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-07-24
+### Added
+- Local, offline text-to-speech via [Pocket TTS](https://github.com/kyutai-labs/pocket-tts)
+  (Kyutai Labs) as an alternative to gTTS, selectable per-run via
+  `TTS_PROVIDER` — CPU-only, no API key, multiple realistic voices (21 for
+  English), with automatic per-field fallback to gTTS for languages Pocket
+  TTS doesn't ship a model for.
+
 ## [2.3.0] - 2026-07-21
 ### Added
 - Version tracking: the `VERSION` file, this changelog, a version badge in

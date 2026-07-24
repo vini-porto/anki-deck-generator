@@ -229,18 +229,50 @@ async function settingsGeneration(crumbs) {
   await runScreen({ title: 'Generation Settings', breadcrumb: trail, summary: bannerSummary(), items });
 }
 
-async function settingsAudio(crumbs) {
-  const trail = [...crumbs, 'Audio'];
+function pocketTtsVoiceOptions(langCode) {
+  const options = getOptions();
+  const pocketLang = options.pocket_tts_lang_map[langCode] || 'english';
+  const voices = options.pocket_tts_voices[pocketLang] || options.pocket_tts_voices.english;
+  return voices.map((v) => [v, v.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())]);
+}
+
+async function pocketTtsSettings(crumbs) {
+  const cfg = getCfgStore().get();
+  const trail = [...crumbs, 'Pocket TTS settings'];
   const items = [
-    toggleItem('Enable audio (master switch)', 'ENABLE_AUDIO'),
+    pickerItem('Source voice', 'POCKET_TTS_VOICE_SOURCE', pocketTtsVoiceOptions(cfg.TTS_SOURCE_LANG)),
+    pickerItem('Target voice', 'POCKET_TTS_VOICE_TARGET', pocketTtsVoiceOptions(cfg.TTS_TARGET_LANG)),
     separatorItem(),
-    toggleItem('Word pronunciation audio', 'ENABLE_WORD_AUDIO'),
-    toggleItem('Example sentence audio', 'ENABLE_EXAMPLE_AUDIO'),
-    toggleItem('Meaning audio (native lang)', 'ENABLE_MEANING_AUDIO'),
+    toggleItem('Int8 quantization', 'POCKET_TTS_QUANTIZE'),
     separatorItem(),
     backItem(),
   ];
-  await runScreen({ title: 'Audio Settings', breadcrumb: trail, summary: bannerSummary(), items });
+  await runScreen({ title: 'Pocket TTS Settings', breadcrumb: trail, summary: bannerSummary(), items });
+}
+
+async function settingsAudio(crumbs) {
+  const options = getOptions();
+  const trail = [...crumbs, 'Audio'];
+  while (true) {
+    const items = [
+      toggleItem('Enable audio (master switch)', 'ENABLE_AUDIO'),
+      separatorItem(),
+      toggleItem('Word pronunciation audio', 'ENABLE_WORD_AUDIO'),
+      toggleItem('Example sentence audio', 'ENABLE_EXAMPLE_AUDIO'),
+      toggleItem('Meaning audio (native lang)', 'ENABLE_MEANING_AUDIO'),
+      separatorItem(),
+      pickerItem('TTS provider', 'TTS_PROVIDER', options.tts_providers),
+      actionItem('Pocket TTS settings', 'pocket_tts', () => {
+        const c = getCfgStore().get();
+        return c.TTS_PROVIDER === 'pocket_tts' ? `${c.POCKET_TTS_VOICE_SOURCE} / ${c.POCKET_TTS_VOICE_TARGET}` : 'n/a — gTTS selected';
+      }),
+      separatorItem(),
+      backItem(),
+    ];
+    const choice = await runScreen({ title: 'Audio Settings', breadcrumb: trail, summary: bannerSummary(), items });
+    if (choice === undefined || choice === 'back') return;
+    if (choice === 'pocket_tts') await pocketTtsSettings(trail);
+  }
 }
 
 async function settingsGif(crumbs) {

@@ -131,6 +131,44 @@ it to `AI_PROVIDER_CALLERS` / `AI_PROVIDER_KEY_FIELD` / `AI_PROVIDER_MODEL_FIELD
 / `AI_PROVIDER_LABELS`, add its config.py fields, and add a branch in
 `configure_ai()`'s `_provider_settings()` for the settings TUI.
 
+## Local TTS provider (Pocket TTS)
+
+`TTS_PROVIDER` in config.py (`"gtts"` default, or `"pocket_tts"`) selects
+between cloud gTTS and [Pocket TTS](https://github.com/kyutai-labs/pocket-tts)
+(Kyutai Labs) — a CPU-only, local TTS engine with multiple realistic voices,
+lazily imported (`from pocket_tts import TTSModel`) so it's not a hard
+dependency, same pattern as the `anthropic` SDK above.
+
+Two real constraints from Pocket TTS's own API shape this implementation
+(verified by extracting and reading the actual wheel, not just its docs —
+worth re-checking if a `pocket-tts` upgrade is ever needed):
+
+- `TTSModel.load_model(language=...)` loads an entire model per language and
+  is slow — `generate_audio()`'s helpers `_get_pocket_tts_model()` /
+  `_get_pocket_tts_voice_state()` cache the loaded model and derived voice
+  state in module-level dicts (`_POCKET_TTS_MODELS`,
+  `_POCKET_TTS_VOICE_STATES`) for the process lifetime, keyed by Pocket
+  TTS's own language id / `(language, voice)` — never reload per call.
+- Pocket TTS only ships weights for 6 languages (`POCKET_TTS_LANG_MAP` maps
+  `TTS_SOURCE_LANG`/`TTS_TARGET_LANG`'s gTTS-style 2-letter codes —
+  `"fr"`, `"en"`, etc. — to Pocket TTS's own identifiers, e.g. `"french_24l"`,
+  note the required `_24l` suffix). Any other language falls back to gTTS
+  per-call with a one-time `[WARN]` (`_warn_pocket_tts_unsupported_lang()`) —
+  this was an explicit product decision (fall back, don't hard-error) so
+  generation never silently stops. `POCKET_TTS_VOICES` lists the real voice
+  catalog per language: 21 for English, exactly 1 for each of French,
+  German, Italian, Portuguese, Spanish.
+
+`generate_audio(text, lang, voice_field)` takes `voice_field="source"` (word
++ example audio, uses `POCKET_TTS_VOICE_SOURCE`) or `"target"` (meaning
+audio, uses `POCKET_TTS_VOICE_TARGET`) so the two Pocket TTS voice slots
+apply to the right field regardless of which physical language each one
+resolves to. Output is WAV (`scipy.io.wavfile.write`), unlike gTTS's MP3 —
+`sound_tag()` doesn't care about the extension, and cache filenames are
+content-addressed on `text + lang + provider + voice` (not just `text +
+lang`) so switching provider/voice can't collide with a previously-cached
+gTTS file for the same text.
+
 ## AI prompt structure
 
 The prompt asks for a JSON response with this shape (identical across all providers):
@@ -311,6 +349,7 @@ gTTS       — Google Text-to-Speech for audio generation
 wordfreq   — frequency-ranked word lists for any language
 requests   — HTTP calls to Groq/OpenAI/Gemini/Ollama and Giphy APIs
 anthropic  — optional, only required when AI_PROVIDER = "anthropic"
+pocket-tts — optional, only required when TTS_PROVIDER = "pocket_tts" (local TTS)
 ```
 
 ---
@@ -361,6 +400,8 @@ CARD_TYPE                       # "basic" | "basic_reversed" | "type_answer" | "
 ENABLE_CATEGORIES               # category subdecks + topic:: tags (see Category / subdeck organization)
 ENABLE_AUDIO / ENABLE_GIF       # toggle features on/off
 ENABLE_WORD_AUDIO / ENABLE_EXAMPLE_AUDIO / ENABLE_MEANING_AUDIO
+TTS_PROVIDER                    # "gtts" | "pocket_tts" (see § Local TTS provider)
+POCKET_TTS_VOICE_SOURCE / POCKET_TTS_VOICE_TARGET / POCKET_TTS_QUANTIZE
 GIF_RATING                      # Giphy content filter: "g" | "pg" | "pg-13"
 DECK_NAME / DECK_OUTPUT_NEW / DECK_OUTPUT_FULL / DB_PATH / AUDIO_DIR
 DECK_ID / MODEL_ID              # stable Anki identifiers — never change after first run

@@ -136,12 +136,30 @@ ENABLE_CATEGORIES = True
 #  ENABLE_WORD_AUDIO   : audio for the word alone
 #  ENABLE_EXAMPLE_AUDIO: audio for the example sentence
 #  ENABLE_MEANING_AUDIO: audio for the English meaning
+#
+#  TTS_PROVIDER : "gtts" (cloud, one voice per language, default) or
+#                 "pocket_tts" (local/CPU, multiple realistic voices —
+#                 https://github.com/kyutai-labs/pocket-tts, requires
+#                 `pip install pocket-tts`). Pocket TTS only ships models
+#                 for English/French/German/Italian/Portuguese/Spanish —
+#                 any other TTS_SOURCE_LANG/TTS_TARGET_LANG falls back to
+#                 gTTS automatically. See CLAUDE.md § Local TTS provider.
+#  POCKET_TTS_VOICE_SOURCE/TARGET : voice name used for that language slot.
+#                 Only English has a wide voice catalog — other languages
+#                 currently ship exactly one voice each.
+#  POCKET_TTS_QUANTIZE : int8 quantization — less RAM, faster, no quality
+#                 loss (needs `pip install pocket-tts[quantize]`).
 # ─────────────────────────────────────────────────────────────
 
 ENABLE_AUDIO         = True
 ENABLE_WORD_AUDIO    = True
 ENABLE_EXAMPLE_AUDIO = True
 ENABLE_MEANING_AUDIO = True
+
+TTS_PROVIDER             = "gtts"   # "gtts" | "pocket_tts"
+POCKET_TTS_VOICE_SOURCE  = "alba"   # voice for word + example audio (TTS_SOURCE_LANG)
+POCKET_TTS_VOICE_TARGET  = "alba"   # voice for meaning audio (TTS_TARGET_LANG)
+POCKET_TTS_QUANTIZE      = False
 
 
 # ─────────────────────────────────────────────────────────────

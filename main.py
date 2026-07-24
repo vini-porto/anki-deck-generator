@@ -532,6 +532,67 @@ AI_PROVIDER_CALLERS = {
 }
 
 
+def current_tts_provider():
+    return getattr(config, "TTS_PROVIDER", "gtts")
+
+
+# gTTS-style 2-letter codes (TTS_SOURCE_LANG / TTS_TARGET_LANG) -> Pocket TTS
+# language identifiers. Pocket TTS only ships these 6 languages; anything
+# else falls back to gTTS per-call — see generate_audio().
+POCKET_TTS_LANG_MAP = {
+    "en": "english",
+    "fr": "french_24l",
+    "de": "german_24l",
+    "it": "italian",
+    "pt": "portuguese",
+    "es": "spanish_24l",
+}
+
+# Pocket TTS voice catalog per language. English has a wide selection;
+# every other supported language currently ships exactly one voice.
+POCKET_TTS_VOICES = {
+    "english":     ["alba", "anna", "azelma", "bill_boerst", "caro_davy", "charles",
+                     "cosette", "eponine", "eve", "fantine", "george", "jane",
+                     "javert", "jean", "marius", "mary", "michael", "paul",
+                     "peter_yearsley", "stuart_bell", "vera"],
+    "french_24l":  ["estelle"],
+    "german_24l":  ["juergen"],
+    "italian":     ["giovanni"],
+    "portuguese":  ["rafael"],
+    "spanish_24l": ["lola"],
+}
+
+# Loading a Pocket TTS model (and deriving a voice state) is slow, so both
+# are cached in memory for the lifetime of this process rather than redone
+# per call — see CLAUDE.md § Local TTS provider.
+_POCKET_TTS_MODELS = {}        # pocket-tts language id -> TTSModel
+_POCKET_TTS_VOICE_STATES = {}  # (language id, voice name) -> voice state dict
+_POCKET_TTS_WARNED_LANGS = set()  # gTTS lang codes already warned-and-fell-back-on
+
+
+def _get_pocket_tts_model(language):
+    if language not in _POCKET_TTS_MODELS:
+        from pocket_tts import TTSModel
+        print(col(f"    [Pocket TTS] Loading '{language}' model (first use, may take a moment)...", 'dim'))
+        _POCKET_TTS_MODELS[language] = TTSModel.load_model(
+            language=language, quantize=config.POCKET_TTS_QUANTIZE
+        )
+    return _POCKET_TTS_MODELS[language]
+
+
+def _get_pocket_tts_voice_state(model, language, voice):
+    key = (language, voice)
+    if key not in _POCKET_TTS_VOICE_STATES:
+        _POCKET_TTS_VOICE_STATES[key] = model.get_state_for_audio_prompt(voice)
+    return _POCKET_TTS_VOICE_STATES[key]
+
+
+def _warn_pocket_tts_unsupported_lang(lang):
+    if lang not in _POCKET_TTS_WARNED_LANGS:
+        _POCKET_TTS_WARNED_LANGS.add(lang)
+        print(col(f"    [WARN] Pocket TTS has no '{lang}' model — falling back to gTTS for this language.", 'yellow'))
+
+
 def _build_category_hint(known_categories):
     if not known_categories:
         return ("There are no existing categories yet for this deck — only introduce one "
@@ -605,19 +666,53 @@ def fetch_gif(keywords):
 
 
 # ─────────────────────────────────────────────
-#  Audio generation (gTTS)
+#  Audio generation (gTTS / Pocket TTS)
 # ─────────────────────────────────────────────
 
-def generate_audio(text, lang):
-    if not config.ENABLE_AUDIO:
-        return "", ""
-    os.makedirs(config.AUDIO_DIR, exist_ok=True)
+def generate_audio_gtts(text, lang):
     filename = hashlib.md5((text + lang).encode()).hexdigest() + ".mp3"
     path     = os.path.join(config.AUDIO_DIR, filename)
     if not os.path.exists(path):
         gTTS(text=text, lang=lang).save(path)
         time.sleep(config.DELAY_TTS)
     return path, filename
+
+
+def generate_audio(text, lang, voice_field="source"):
+    """voice_field selects which Pocket TTS voice slot to use — "source" for
+    word/example audio (TTS_SOURCE_LANG), "target" for meaning audio
+    (TTS_TARGET_LANG). Ignored when TTS_PROVIDER = "gtts"."""
+    if not config.ENABLE_AUDIO:
+        return "", ""
+    os.makedirs(config.AUDIO_DIR, exist_ok=True)
+
+    if current_tts_provider() != "pocket_tts":
+        return generate_audio_gtts(text, lang)
+
+    pocket_lang = POCKET_TTS_LANG_MAP.get(lang)
+    if pocket_lang is None:
+        _warn_pocket_tts_unsupported_lang(lang)
+        return generate_audio_gtts(text, lang)
+
+    voice = (config.POCKET_TTS_VOICE_SOURCE if voice_field == "source"
+             else config.POCKET_TTS_VOICE_TARGET)
+    # Content-address on provider+voice too, so switching provider/voice
+    # doesn't collide with a previously-cached gTTS mp3 for the same text+lang.
+    filename = hashlib.md5(f"{text}{lang}pocket_tts{voice}".encode()).hexdigest() + ".wav"
+    path     = os.path.join(config.AUDIO_DIR, filename)
+    if os.path.exists(path):
+        return path, filename
+
+    try:
+        import scipy.io.wavfile
+        model = _get_pocket_tts_model(pocket_lang)
+        state = _get_pocket_tts_voice_state(model, pocket_lang, voice)
+        audio = model.generate_audio(state, text)
+        scipy.io.wavfile.write(path, model.sample_rate, audio.numpy())
+        return path, filename
+    except ImportError:
+        print(col("    [Pocket TTS] Missing dependency — run: pip install pocket-tts", 'yellow'))
+        return generate_audio_gtts(text, lang)
 
 
 # ─────────────────────────────────────────────
@@ -1155,6 +1250,11 @@ _GIF_RATINGS = [
     ("r",    "R — least restrictive"),
 ]
 
+_TTS_PROVIDERS = [
+    ("gtts",       "gTTS — cloud (Google Translate TTS), one voice per language (default)"),
+    ("pocket_tts", "Pocket TTS — local/CPU, multiple realistic voices (Kyutai Labs)"),
+]
+
 
 def _options_snapshot():
     """Static picker option lists, as JSON, for alternative frontends
@@ -1171,6 +1271,9 @@ def _options_snapshot():
         "provider_labels":      AI_PROVIDER_LABELS,
         "provider_model_field": AI_PROVIDER_MODEL_FIELD,
         "provider_key_field":   AI_PROVIDER_KEY_FIELD,
+        "tts_providers":        _TTS_PROVIDERS,
+        "pocket_tts_lang_map":  POCKET_TTS_LANG_MAP,
+        "pocket_tts_voices":    POCKET_TTS_VOICES,
     }
 
 
@@ -1344,6 +1447,28 @@ def configure_generation():
     ])
 
 
+def _pocket_tts_voice_options(lang_code):
+    pocket_lang = POCKET_TTS_LANG_MAP.get(lang_code, "english")
+    voices      = POCKET_TTS_VOICES.get(pocket_lang, POCKET_TTS_VOICES["english"])
+    return [(v, v.replace("_", " ").title()) for v in voices]
+
+
+def configure_pocket_tts():
+    _tui.run_menu('Pocket TTS Settings', [
+        _tui.Picker('Source voice', 'POCKET_TTS_VOICE_SOURCE',
+                    _pocket_tts_voice_options(config.TTS_SOURCE_LANG),
+                    hint=f'Word + example audio ({config.TTS_SOURCE_LANG})'),
+        _tui.Picker('Target voice', 'POCKET_TTS_VOICE_TARGET',
+                    _pocket_tts_voice_options(config.TTS_TARGET_LANG),
+                    hint=f'Meaning audio ({config.TTS_TARGET_LANG})'),
+        _tui.Separator(),
+        _tui.Toggle('Int8 quantization', 'POCKET_TTS_QUANTIZE',
+                    hint='Less RAM, faster, no quality loss — needs pocket-tts[quantize]'),
+        _tui.Separator(),
+        _tui.Back(),
+    ])
+
+
 def configure_audio():
     _tui.run_menu('Audio Settings', [
         _tui.Toggle('Enable audio (master switch)', 'ENABLE_AUDIO'),
@@ -1351,6 +1476,12 @@ def configure_audio():
         _tui.Toggle('Word pronunciation audio',     'ENABLE_WORD_AUDIO'),
         _tui.Toggle('Example sentence audio',       'ENABLE_EXAMPLE_AUDIO'),
         _tui.Toggle('Meaning audio (native lang)',  'ENABLE_MEANING_AUDIO'),
+        _tui.Separator(),
+        _tui.Picker('TTS provider', 'TTS_PROVIDER', _TTS_PROVIDERS),
+        _tui.Action('Pocket TTS settings',
+                    configure_pocket_tts,
+                    lambda: (f'{config.POCKET_TTS_VOICE_SOURCE} / {config.POCKET_TTS_VOICE_TARGET}'
+                             if current_tts_provider() == 'pocket_tts' else 'n/a — gTTS selected')),
         _tui.Separator(),
         _tui.Back(),
     ])
@@ -1507,7 +1638,7 @@ def _generate_loop(conn, pending, limit):
         audio_word_path = ""
         if config.ENABLE_AUDIO and config.ENABLE_WORD_AUDIO:
             try:
-                audio_word_path, _ = generate_audio(word, lang=config.TTS_SOURCE_LANG)
+                audio_word_path, _ = generate_audio(word, lang=config.TTS_SOURCE_LANG, voice_field="source")
                 print(col('    [AUDIO] Word audio', 'dim'))
             except Exception as e:
                 print(col(f'    [WARN] Word audio error: {e}', 'yellow'))
@@ -1534,7 +1665,7 @@ def _generate_loop(conn, pending, limit):
             if config.ENABLE_AUDIO and config.ENABLE_EXAMPLE_AUDIO:
                 try:
                     audio_example_path, _ = generate_audio(
-                        text_example, lang=config.TTS_SOURCE_LANG
+                        text_example, lang=config.TTS_SOURCE_LANG, voice_field="source"
                     )
                     print(col(f'    [AUDIO] Example — meaning {meaning_id}', 'dim'))
                 except Exception as e:
@@ -1544,7 +1675,7 @@ def _generate_loop(conn, pending, limit):
             if config.ENABLE_AUDIO and config.ENABLE_MEANING_AUDIO:
                 try:
                     audio_meaning_path, _ = generate_audio(
-                        text_meaning, lang=config.TTS_TARGET_LANG
+                        text_meaning, lang=config.TTS_TARGET_LANG, voice_field="target"
                     )
                 except Exception:
                     pass
