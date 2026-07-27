@@ -209,7 +209,6 @@ async function settingsDeck(crumbs) {
   const items = [
     textItem('Deck name', 'DECK_NAME'),
     pickerItem('Card template', 'CARD_TEMPLATE', options.templates),
-    pickerItem('Card type', 'CARD_TYPE', options.card_types),
     textItem('Output — new deck', 'DECK_OUTPUT_NEW'),
     textItem('Output — full deck', 'DECK_OUTPUT_FULL'),
     separatorItem(),
@@ -219,14 +218,109 @@ async function settingsDeck(crumbs) {
 }
 
 async function settingsGeneration(crumbs) {
+  const options = getOptions();
   const trail = [...crumbs, 'Generation'];
   const items = [
     numberItem('Words per run', 'WORDS_PER_RUN', { minVal: 1, step: 5 }),
     numberItem('Total word pool', 'TOTAL_WORD_POOL', { minVal: 100, step: 100 }),
     separatorItem(),
+    pickerItem('Meaning exhaustiveness', 'MEANING_EXHAUSTIVENESS', options.meaning_exhaustiveness_options),
+    separatorItem(),
+    pickerItem('Word source', 'WORD_SOURCE', options.word_sources),
+    textItem('Markdown notes folder', 'MARKDOWN_NOTES_PATH'),
+    pickerItem('Markdown extraction', 'MARKDOWN_EXTRACTION_MODE', options.markdown_extraction_modes),
+    separatorItem(),
     backItem(),
   ];
   await runScreen({ title: 'Generation Settings', breadcrumb: trail, summary: bannerSummary(), items });
+}
+
+// ── Card content — guided flow: "Word or phrase?" then "how tested?" ───
+// CREATION_MODE stays the one stored setting; CARD_TYPE joins it only for
+// the word_meaning-family testing styles. See CLAUDE.md § Creation modes.
+
+const WORD_FAMILY_MODES = new Set(['word_meaning', 'audio_meaning', 'audio_writing', 'audio_typing']);
+const PHRASE_FAMILY_MODES = new Set([
+  'phrase_context', 'phrase_native_writing', 'phrase_audio_recognition', 'phrase_audio_typing',
+]);
+
+function wordContentHint() {
+  const c = getCfgStore().get();
+  if (!WORD_FAMILY_MODES.has(c.CREATION_MODE)) return '';
+  const key = c.CREATION_MODE === 'word_meaning' ? `word_meaning:${c.CARD_TYPE}` : c.CREATION_MODE;
+  const options = getOptions();
+  const match = options.word_testing_options.find(([v]) => v === key);
+  return match ? match[1] : c.CREATION_MODE;
+}
+
+function phraseContentHint() {
+  const c = getCfgStore().get();
+  if (!PHRASE_FAMILY_MODES.has(c.CREATION_MODE)) return '';
+  const options = getOptions();
+  const match = options.phrase_testing_options.find(([v]) => v === c.CREATION_MODE);
+  return match ? match[1] : '';
+}
+
+// Hand-built (not pickerItem()) since selecting a word_meaning-family
+// option needs to write BOTH CREATION_MODE and CARD_TYPE from one choice —
+// pickerItem()'s factory only ever writes a single config key.
+function wordTestingItem() {
+  const store = getCfgStore();
+  const options = getOptions().word_testing_options;
+  return {
+    kind: 'picker',
+    label: 'How do you want to be tested?',
+    options,
+    getValue: () => {
+      const cfg = store.get();
+      return cfg.CREATION_MODE === 'word_meaning' ? `word_meaning:${cfg.CARD_TYPE}` : cfg.CREATION_MODE;
+    },
+    setValue: async (v) => {
+      if (v.includes(':')) {
+        const [mode, cardType] = v.split(':');
+        await store.set('CREATION_MODE', mode, 'str');
+        await store.set('CARD_TYPE', cardType, 'str');
+      } else {
+        await store.set('CREATION_MODE', v, 'str');
+      }
+    },
+  };
+}
+
+async function wordContentMenu(crumbs) {
+  const trail = [...crumbs, 'Word-based cards'];
+  const items = [wordTestingItem(), separatorItem(), backItem()];
+  await runScreen({ title: 'Word-Based Cards', breadcrumb: trail, summary: bannerSummary(), items });
+}
+
+async function phraseContentMenu(crumbs) {
+  const options = getOptions();
+  const trail = [...crumbs, 'Phrase-based cards'];
+  const items = [
+    pickerItem('How do you want to be tested?', 'CREATION_MODE', options.phrase_testing_options),
+    separatorItem(),
+    backItem(),
+  ];
+  await runScreen({ title: 'Phrase-Based Cards', breadcrumb: trail, summary: bannerSummary(), items });
+}
+
+async function cardContentMenu(crumbs) {
+  const options = getOptions();
+  const trail = [...crumbs, 'Card content'];
+  while (true) {
+    const items = [
+      actionItem('Word-based cards', 'word', wordContentHint),
+      actionItem('Phrase-based cards', 'phrase', phraseContentHint),
+      separatorItem(),
+      pickerItem('Field verbosity', 'CREATION_MODE_VERBOSITY', options.creation_mode_verbosity_options),
+      separatorItem(),
+      backItem(),
+    ];
+    const choice = await runScreen({ title: 'Card Content', breadcrumb: trail, summary: bannerSummary(), items });
+    if (choice === undefined || choice === 'back') return;
+    if (choice === 'word') await wordContentMenu(trail);
+    else if (choice === 'phrase') await phraseContentMenu(trail);
+  }
 }
 
 function pocketTtsVoiceOptions(langCode) {
@@ -317,13 +411,11 @@ async function settingsMain(crumbs) {
         const label = getOptions().provider_labels[c.AI_PROVIDER] || c.AI_PROVIDER;
         return label + (aiKeyMissing() ? '  ! key missing' : '');
       }),
-      actionItem('Deck & cards', 'deck', () => {
-        const c = getCfgStore().get();
-        return `${c.CARD_TEMPLATE}  |  ${c.CARD_TYPE}`;
-      }),
+      actionItem('Card content', 'cardcontent', () => wordContentHint() || phraseContentHint()),
+      actionItem('Deck & cards', 'deck', () => getCfgStore().get().CARD_TEMPLATE),
       actionItem('Generation', 'generation', () => {
         const c = getCfgStore().get();
-        return `${c.WORDS_PER_RUN}/run   pool ${c.TOTAL_WORD_POOL}`;
+        return `${c.WORDS_PER_RUN}/run   pool ${c.TOTAL_WORD_POOL}   meanings: ${c.MEANING_EXHAUSTIVENESS}`;
       }),
       actionItem('Audio', 'audio', () => (getCfgStore().get().ENABLE_AUDIO ? 'ON' : 'OFF')),
       actionItem('GIF', 'gif', () => {
@@ -341,6 +433,7 @@ async function settingsMain(crumbs) {
     if (choice === undefined || choice === 'back') return;
     if (choice === 'language') await settingsLanguage(trail);
     else if (choice === 'ai') await settingsAi(trail);
+    else if (choice === 'cardcontent') await cardContentMenu(trail);
     else if (choice === 'deck') await settingsDeck(trail);
     else if (choice === 'generation') await settingsGeneration(trail);
     else if (choice === 'audio') await settingsAudio(trail);

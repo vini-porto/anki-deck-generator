@@ -50,13 +50,16 @@ GIPHY_API_KEY     = "your_giphy_api_key_here"
 AI_MODEL        = "llama-3.3-70b-versatile"  # used when AI_PROVIDER = "groq"
 OPENAI_MODEL    = "gpt-4o-mini"              # used when AI_PROVIDER = "openai"
 ANTHROPIC_MODEL = "claude-haiku-4-5"         # used when AI_PROVIDER = "anthropic"
-# Google's free tier drops/adds model access periodically — as of this
-# writing, gemini-2.0-flash and gemini-1.5-flash have 0 free-tier quota
-# (some 404 outright); gemini-2.5-flash-lite is the current free-tier-
-# friendly choice. If this provider starts returning HTTP 429 "limit: 0"
-# errors, check https://ai.google.dev/gemini-api/docs/rate-limits and
-# swap to whatever's currently free.
-GEMINI_MODEL    = "gemini-2.5-flash-lite"    # used when AI_PROVIDER = "gemini"
+# Google's free tier drops/adds model access periodically, and per-model
+# request-per-day caps vary a lot even within the same "Flash Lite" tier —
+# gemini-2.5-flash-lite is capped at a mere 20 RPD on the free tier (that's
+# what caused rate-limit errors after ~20 cards), while gemini-3.5-flash-lite
+# offers 500 RPD / 15 RPM for the same "lite" cost tier, which is what makes
+# a real 500-cards/day workflow possible. If this ever 404s (model retired)
+# or shows 0 free-tier quota, check your account's usage/quota dashboard —
+# gemini-3.1-flash-lite has the identical 500 RPD / 15 RPM ceiling and is a
+# safe same-tier fallback.
+GEMINI_MODEL    = "gemini-3.5-flash-lite"    # used when AI_PROVIDER = "gemini"
 OLLAMA_MODEL    = "llama3.1"                 # used when AI_PROVIDER = "ollama"
 OLLAMA_HOST     = "http://localhost:11434"   # Ollama server address
 
@@ -85,10 +88,39 @@ TTS_TARGET_LANG  = "en"       # gTTS code for the target language audio
 #                   run the script. Adjust daily as needed.
 #  TOTAL_WORD_POOL: total number of most-frequent words to draw
 #                   from. When exhausted, increase this number.
+#  MEANING_EXHAUSTIVENESS: how many distinct meanings the AI generates
+#                   per word (one card is made per meaning):
+#                     "essential" — only the single most essential meaning
+#                     "important" — the handful of most useful ones (default)
+#                     "all"       — every genuinely distinct meaning, up to
+#                                   a higher cap (uses a bigger AI token
+#                                   budget so it doesn't truncate mid-response)
 # ─────────────────────────────────────────────────────────────
 
 WORDS_PER_RUN   = 50
 TOTAL_WORD_POOL = 2000
+MEANING_EXHAUSTIVENESS = "important"   # "essential" | "important" | "all"
+
+
+# ─────────────────────────────────────────────────────────────
+#  WORD SOURCE
+#  Where candidate words come from.
+#    "frequency_list" — top TOTAL_WORD_POOL most-frequent SOURCE_LANG
+#                        words, via wordfreq (default)
+#    "markdown_notes"  — scan MARKDOWN_NOTES_PATH for *.md files (e.g. an
+#                        Obsidian vault) and build the pool from those
+#                        instead. TOTAL_WORD_POOL still caps the result.
+#  MARKDOWN_EXTRACTION_MODE (only used when WORD_SOURCE = "markdown_notes"):
+#    "highlights" — only text wrapped in ==highlight== syntax (recommended:
+#                    high-signal, avoids common function words dominating)
+#    "all_words"  — every word in the notes, ranked by how often it appears
+#  Note: there is no lemmatization — a conjugated/plural form found in your
+#  notes is treated as its own distinct word from its dictionary form.
+# ─────────────────────────────────────────────────────────────
+
+WORD_SOURCE               = "frequency_list"  # "frequency_list" | "markdown_notes"
+MARKDOWN_NOTES_PATH        = ""                # folder scanned recursively for *.md files
+MARKDOWN_EXTRACTION_MODE   = "highlights"     # "highlights" | "all_words"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -116,7 +148,37 @@ CARD_TEMPLATE = "dark"
 #    "cloze"          — fill-in-the-blank using example sentences
 # ─────────────────────────────────────────────────────────────
 
-CARD_TYPE = "type_answer"
+CARD_TYPE = "basic_reversed"
+
+
+# ─────────────────────────────────────────────────────────────
+#  CREATION MODE
+#  Controls WHAT the AI is asked to generate and what serves as the Anki
+#  card's Front (stimulus) vs Back (answer). Independent of CARD_TEMPLATE
+#  (visual styling). CARD_TYPE (note mechanics: basic/basic_reversed/
+#  type_answer/cloze) only applies when CREATION_MODE = "word_meaning" —
+#  every other mode ships its own single fixed note shape (own Anki note
+#  type), and the CARD_TYPE picker has no effect while a different mode
+#  is active.
+#
+#    "word_meaning"          — classic word -> meaning/definition (default)
+#    "phrase_context"        — a natural phrase using the word; recall its
+#                               meaning from context (word highlighted on front)
+#    "audio_meaning"         — hear the word; recall its meaning
+#    "audio_writing"         — hear the word; reveal its written form/spelling
+#    "audio_typing"          — hear the word; type what you heard (auto-checked)
+#    "phrase_native_writing" — a phrase in your native language on the front;
+#                               its correct written translation on the back
+# ─────────────────────────────────────────────────────────────
+
+CREATION_MODE = "phrase_audio_recognition"
+
+# CREATION_MODE_VERBOSITY only affects the 4 audio/production modes above
+# (audio_meaning, audio_writing, audio_typing, phrase_native_writing) —
+# word_meaning and phrase_context are unaffected and always show every field.
+#    "complete" — every applicable field is filled in (default)
+#    "simple"   — only the essential field(s) for that mode
+CREATION_MODE_VERBOSITY = "complete"
 
 
 # ─────────────────────────────────────────────────────────────
