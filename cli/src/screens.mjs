@@ -235,92 +235,94 @@ async function settingsGeneration(crumbs) {
   await runScreen({ title: 'Generation Settings', breadcrumb: trail, summary: bannerSummary(), items });
 }
 
-// ── Card content — guided flow: "Word or phrase?" then "how tested?" ───
+// ── Card content — one screen, 4 cascading pickers (Content/Front/Back/
+// Card type). Every (CREATION_MODE, CARD_TYPE) combo main.py ships is a
+// "leaf" in options.card_content_leaves (from --options-json); picking a
+// value for one axis narrows/resets the axes after it to the first still-
+// valid option — mirrors main.py's _card_content_resolve() exactly, kept
+// as an independent implementation since there's no shared runtime between
+// Python and JS to factor it into (same reasoning _CARD_TYPE_LABELS/
+// _WORD_TESTING_OPTIONS were already independently consumed under).
 // CREATION_MODE stays the one stored setting; CARD_TYPE joins it only for
-// the word_meaning-family testing styles. See CLAUDE.md § Creation modes.
+// the word_meaning-family leaves. See CLAUDE.md § Creation modes.
 
-const WORD_FAMILY_MODES = new Set(['word_meaning', 'audio_meaning', 'audio_writing', 'audio_typing']);
-const PHRASE_FAMILY_MODES = new Set([
-  'phrase_context', 'phrase_native_writing', 'phrase_audio_recognition', 'phrase_audio_typing',
-]);
+const CARD_CONTENT_AXES = ['content', 'front', 'back', 'card_type'];
 
-function wordContentHint() {
-  const c = getCfgStore().get();
-  if (!WORD_FAMILY_MODES.has(c.CREATION_MODE)) return '';
-  const key = c.CREATION_MODE === 'word_meaning' ? `word_meaning:${c.CARD_TYPE}` : c.CREATION_MODE;
-  const options = getOptions();
-  const match = options.word_testing_options.find(([v]) => v === key);
-  return match ? match[1] : c.CREATION_MODE;
+function cardContentCurrentLeaf(leaves) {
+  const cfg = getCfgStore().get();
+  return leaves.find((l) => l.creation_mode === cfg.CREATION_MODE &&
+    (cfg.CREATION_MODE !== 'word_meaning' || l.stored_card_type === cfg.CARD_TYPE)) || leaves[0];
 }
 
-function phraseContentHint() {
-  const c = getCfgStore().get();
-  if (!PHRASE_FAMILY_MODES.has(c.CREATION_MODE)) return '';
-  const options = getOptions();
-  const match = options.phrase_testing_options.find(([v]) => v === c.CREATION_MODE);
-  return match ? match[1] : '';
+function cardContentAxisOptions(leaves, labels, axis, leaf) {
+  const prefix = CARD_CONTENT_AXES.slice(0, CARD_CONTENT_AXES.indexOf(axis));
+  const seen = new Set();
+  const opts = [];
+  for (const cand of leaves) {
+    if (prefix.every((a) => cand[a] === leaf[a]) && !seen.has(cand[axis])) {
+      seen.add(cand[axis]);
+      opts.push([cand[axis], labels[axis][cand[axis]]]);
+    }
+  }
+  return opts;
 }
 
-// Hand-built (not pickerItem()) since selecting a word_meaning-family
-// option needs to write BOTH CREATION_MODE and CARD_TYPE from one choice —
-// pickerItem()'s factory only ever writes a single config key.
-function wordTestingItem() {
+function cardContentResolve(leaves, axis, value) {
+  const leaf = cardContentCurrentLeaf(leaves);
+  const fixed = {};
+  CARD_CONTENT_AXES.slice(0, CARD_CONTENT_AXES.indexOf(axis)).forEach((a) => { fixed[a] = leaf[a]; });
+  fixed[axis] = value;
+  let candidates = leaves;
+  for (const a of CARD_CONTENT_AXES) {
+    if (a in fixed) {
+      const narrowed = candidates.filter((c) => c[a] === fixed[a]);
+      candidates = narrowed.length ? narrowed : candidates;
+    } else {
+      candidates = candidates.filter((c) => c[a] === candidates[0][a]);
+    }
+  }
+  return candidates[0];
+}
+
+async function cardContentSetAxis(leaves, axis, value) {
+  const leaf = cardContentResolve(leaves, axis, value);
   const store = getCfgStore();
-  const options = getOptions().word_testing_options;
+  await store.set('CREATION_MODE', leaf.creation_mode, 'str');
+  if (leaf.stored_card_type != null) await store.set('CARD_TYPE', leaf.stored_card_type, 'str');
+}
+
+function cardContentItem(leaves, labels, label, axis) {
   return {
     kind: 'picker',
-    label: 'How do you want to be tested?',
-    options,
-    getValue: () => {
-      const cfg = store.get();
-      return cfg.CREATION_MODE === 'word_meaning' ? `word_meaning:${cfg.CARD_TYPE}` : cfg.CREATION_MODE;
-    },
-    setValue: async (v) => {
-      if (v.includes(':')) {
-        const [mode, cardType] = v.split(':');
-        await store.set('CREATION_MODE', mode, 'str');
-        await store.set('CARD_TYPE', cardType, 'str');
-      } else {
-        await store.set('CREATION_MODE', v, 'str');
-      }
-    },
+    label,
+    options: () => cardContentAxisOptions(leaves, labels, axis, cardContentCurrentLeaf(leaves)),
+    getValue: () => cardContentCurrentLeaf(leaves)[axis],
+    setValue: (v) => cardContentSetAxis(leaves, axis, v),
   };
 }
 
-async function wordContentMenu(crumbs) {
-  const trail = [...crumbs, 'Word-based cards'];
-  const items = [wordTestingItem(), separatorItem(), backItem()];
-  await runScreen({ title: 'Word-Based Cards', breadcrumb: trail, summary: bannerSummary(), items });
-}
-
-async function phraseContentMenu(crumbs) {
+function cardContentHint() {
   const options = getOptions();
-  const trail = [...crumbs, 'Phrase-based cards'];
-  const items = [
-    pickerItem('How do you want to be tested?', 'CREATION_MODE', options.phrase_testing_options),
-    separatorItem(),
-    backItem(),
-  ];
-  await runScreen({ title: 'Phrase-Based Cards', breadcrumb: trail, summary: bannerSummary(), items });
+  const leaf = cardContentCurrentLeaf(options.card_content_leaves);
+  return `${options.card_content_labels.front[leaf.front]} -> ${options.card_content_labels.back[leaf.back]}`;
 }
 
 async function cardContentMenu(crumbs) {
   const options = getOptions();
+  const leaves = options.card_content_leaves;
+  const labels = options.card_content_labels;
   const trail = [...crumbs, 'Card content'];
-  while (true) {
-    const items = [
-      actionItem('Word-based cards', 'word', wordContentHint),
-      actionItem('Phrase-based cards', 'phrase', phraseContentHint),
-      separatorItem(),
-      pickerItem('Field verbosity', 'CREATION_MODE_VERBOSITY', options.creation_mode_verbosity_options),
-      separatorItem(),
-      backItem(),
-    ];
-    const choice = await runScreen({ title: 'Card Content', breadcrumb: trail, summary: bannerSummary(), items });
-    if (choice === undefined || choice === 'back') return;
-    if (choice === 'word') await wordContentMenu(trail);
-    else if (choice === 'phrase') await phraseContentMenu(trail);
-  }
+  const items = [
+    cardContentItem(leaves, labels, 'Content', 'content'),
+    cardContentItem(leaves, labels, 'Front', 'front'),
+    cardContentItem(leaves, labels, 'Back', 'back'),
+    cardContentItem(leaves, labels, 'Card type', 'card_type'),
+    separatorItem(),
+    pickerItem('Field verbosity', 'CREATION_MODE_VERBOSITY', options.creation_mode_verbosity_options),
+    separatorItem(),
+    backItem(),
+  ];
+  await runScreen({ title: 'Card Content', breadcrumb: trail, summary: bannerSummary(), items });
 }
 
 function pocketTtsVoiceOptions(langCode) {
@@ -411,7 +413,7 @@ async function settingsMain(crumbs) {
         const label = getOptions().provider_labels[c.AI_PROVIDER] || c.AI_PROVIDER;
         return label + (aiKeyMissing() ? '  ! key missing' : '');
       }),
-      actionItem('Card content', 'cardcontent', () => wordContentHint() || phraseContentHint()),
+      actionItem('Card content', 'cardcontent', cardContentHint),
       actionItem('Deck & cards', 'deck', () => getCfgStore().get().CARD_TEMPLATE),
       actionItem('Generation', 'generation', () => {
         const c = getCfgStore().get();

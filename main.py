@@ -1209,17 +1209,21 @@ def _content_key_phrase_native_writing(word, item):
 
 
 def _phrase_native_writing_extract(item):
-    correct = item.get("correct_translation", "")
+    correct = item.get("correct_translation", "").replace("**", "").strip()
     return {
         "text_meaning": item.get("text_meaning", ""),
-        "text_example_phrase": correct,                          # SOURCE_LANG answer, WITH ** markers
+        "text_example_phrase": correct,                          # SOURCE_LANG answer, marker-stripped —
+                                                                   # {{type:}} needs a verbatim match (same
+                                                                   # trade-off as phrase_audio_typing)
         "text_example_translation": item.get("native_phrase", ""),  # TARGET_LANG prompt, shown on Front
-        "tts_example_text": correct.replace("**", "").strip(),     # stripped for TTS
+        "tts_example_text": correct,
     }
 
 
 _PHRASE_NATIVE_WRITING_FRONT = """
 <div class="example-translation">{{Text_Example_Translation}}</div>
+<br>
+{{type:Text_Example_Phrase}}
 """
 
 _PHRASE_NATIVE_WRITING_BACK = """
@@ -2168,35 +2172,95 @@ _TTS_PROVIDERS = [
     ("pocket_tts", "Pocket TTS — local/CPU, multiple realistic voices (Kyutai Labs)"),
 ]
 
-# "Card content" — a guided 2-step flow (Word-based / Phrase-based, then
-# "how do you want to be tested?") replaces a single flat CREATION_MODE
-# picker + a separate CARD_TYPE picker. _WORD_TESTING_OPTIONS values that
-# contain ":" combine CREATION_MODE + CARD_TYPE into one choice (see
-# _WordTestingPicker below) since word_meaning's 4 CARD_TYPE variants are,
-# from the user's perspective, just more "how tested" answers for word
-# content, not a separate axis. Only modes with a real CREATION_MODES
-# registry entry are listed — deliberately not exposing
-# selectable-but-unimplemented modes in either TUI.
-_WORD_FAMILY_MODES = {"word_meaning", "audio_meaning", "audio_writing", "audio_typing"}
-_PHRASE_FAMILY_MODES = {"phrase_context", "phrase_native_writing",
-                         "phrase_audio_recognition", "phrase_audio_typing"}
-
-_WORD_TESTING_OPTIONS = [
-    ("word_meaning:basic",          "See the meaning"),
-    ("word_meaning:basic_reversed", "See the meaning, both directions"),
-    ("word_meaning:type_answer",    "See the meaning, type the word"),
-    ("word_meaning:cloze",          "Fill in the blank in a sentence"),
-    ("audio_meaning",               "Hear it, recall the meaning"),
-    ("audio_writing",               "Hear it, recall the spelling"),
-    ("audio_typing",                "Hear it, type what you heard"),
+# "Card content" — one screen, 4 cascading pickers (Content/Front/Back/Card
+# type) instead of a flat CREATION_MODE picker + a separate CARD_TYPE
+# picker. Every one of the 11 shipped (CREATION_MODE, CARD_TYPE)
+# combinations is a "leaf" in this table; picking a value for one axis
+# narrows/resets the axes after it to the first still-valid option (see
+# _card_content_resolve()). Value tokens are globally unique across axes
+# (word_spelling vs phrase_spelling, not a shared "spelling") so a given
+# token always displays the same label regardless of which axis's options
+# list it appears in — the JS TUI's row-render cache keys on label+value,
+# not on the options list that produced it, so this matters there.
+_CARD_CONTENT_LEAVES = [
+    {"content": "word",   "front": "word_text",           "back": "meaning",                "card_type": "basic",          "creation_mode": "word_meaning",            "stored_card_type": "basic"},
+    {"content": "word",   "front": "word_text",           "back": "meaning",                "card_type": "basic_reversed", "creation_mode": "word_meaning",            "stored_card_type": "basic_reversed"},
+    {"content": "word",   "front": "word_text",           "back": "meaning",                "card_type": "type_answer",    "creation_mode": "word_meaning",            "stored_card_type": "type_answer"},
+    {"content": "word",   "front": "word_text",           "back": "meaning",                "card_type": "cloze",          "creation_mode": "word_meaning",            "stored_card_type": "cloze"},
+    {"content": "word",   "front": "word_audio",          "back": "meaning",                "card_type": "basic",          "creation_mode": "audio_meaning",           "stored_card_type": None},
+    {"content": "word",   "front": "word_audio",          "back": "word_spelling",          "card_type": "basic",          "creation_mode": "audio_writing",           "stored_card_type": None},
+    {"content": "word",   "front": "word_audio",          "back": "word_spelling",          "card_type": "type_answer",    "creation_mode": "audio_typing",            "stored_card_type": None},
+    {"content": "phrase", "front": "phrase_source_text",  "back": "phrase_meaning_context", "card_type": "basic",          "creation_mode": "phrase_context",          "stored_card_type": None},
+    {"content": "phrase", "front": "phrase_source_audio", "back": "phrase_meaning_context", "card_type": "basic",          "creation_mode": "phrase_audio_recognition","stored_card_type": None},
+    {"content": "phrase", "front": "phrase_source_audio", "back": "phrase_spelling",        "card_type": "type_answer",    "creation_mode": "phrase_audio_typing",     "stored_card_type": None},
+    {"content": "phrase", "front": "phrase_native_text",  "back": "phrase_translation",     "card_type": "type_answer",    "creation_mode": "phrase_native_writing",   "stored_card_type": None},
 ]
 
-_PHRASE_TESTING_OPTIONS = [
-    ("phrase_context",           "See the meaning in context"),
-    ("phrase_native_writing",    "Write the translation"),
-    ("phrase_audio_recognition", "Hear it, recall the phrase"),
-    ("phrase_audio_typing",      "Hear it, type what you heard"),
-]
+_CARD_CONTENT_LABELS = {
+    "content": {"word": "Word", "phrase": "Phrase"},
+    "front": {
+        "word_text": "Word (text)", "word_audio": "Word (audio)",
+        "phrase_source_text": "Phrase (text)", "phrase_source_audio": "Phrase (audio)",
+        "phrase_native_text": "Phrase, your language (text)",
+    },
+    "back": {
+        "meaning": "Meaning", "word_spelling": "Word (spelling)",
+        "phrase_meaning_context": "Meaning + translation",
+        "phrase_spelling": "Phrase (spelling)", "phrase_translation": "Translation",
+    },
+    "card_type": _CARD_TYPE_LABELS,   # reuse the existing dict verbatim
+}
+
+_AXES = ("content", "front", "back", "card_type")
+
+
+def _card_content_current_leaf():
+    mode = current_creation_mode()
+    ct = getattr(config, "CARD_TYPE", "basic") if mode == "word_meaning" else None
+    for leaf in _CARD_CONTENT_LEAVES:
+        if leaf["creation_mode"] == mode and (mode != "word_meaning" or leaf["stored_card_type"] == ct):
+            return leaf
+    return _CARD_CONTENT_LEAVES[0]
+
+
+def _card_content_axis_options(axis, leaf):
+    prefix = _AXES[:_AXES.index(axis)]
+    seen, opts = set(), []
+    for cand in _CARD_CONTENT_LEAVES:
+        if all(cand[a] == leaf[a] for a in prefix) and cand[axis] not in seen:
+            seen.add(cand[axis])
+            opts.append((cand[axis], _CARD_CONTENT_LABELS[axis][cand[axis]]))
+    return opts
+
+
+def _card_content_resolve(axis, value):
+    """Current leaf with `axis` set to `value`; every axis after it in
+    _AXES order falls back to the first option still valid for the new
+    prefix (the natural "cascade reset" when an upstream choice changes)."""
+    leaf = _card_content_current_leaf()
+    fixed = {a: leaf[a] for a in _AXES[:_AXES.index(axis)]}
+    fixed[axis] = value
+    candidates = _CARD_CONTENT_LEAVES
+    for a in _AXES:
+        if a in fixed:
+            narrowed = [c for c in candidates if c[a] == fixed[a]]
+            candidates = narrowed or candidates
+        else:
+            candidates = [c for c in candidates if c[a] == candidates[0][a]]
+    return candidates[0]
+
+
+def _card_content_set_axis(axis, value):
+    leaf = _card_content_resolve(axis, value)
+    write_config('CREATION_MODE', leaf['creation_mode'])
+    if leaf['stored_card_type'] is not None:
+        write_config('CARD_TYPE', leaf['stored_card_type'])
+
+
+def _card_content_hint():
+    leaf = _card_content_current_leaf()
+    return f"{_CARD_CONTENT_LABELS['front'][leaf['front']]} -> {_CARD_CONTENT_LABELS['back'][leaf['back']]}"
+
 
 _CREATION_MODE_VERBOSITY_OPTIONS = [
     ("complete", "Complete — every applicable field filled in (default)"),
@@ -2233,8 +2297,8 @@ def _options_snapshot():
         "pocket_tts_lang_map":  POCKET_TTS_LANG_MAP,
         "pocket_tts_voices":    POCKET_TTS_VOICES,
         "meaning_exhaustiveness_options": _MEANING_EXHAUSTIVENESS_OPTIONS,
-        "word_testing_options":   _WORD_TESTING_OPTIONS,
-        "phrase_testing_options": _PHRASE_TESTING_OPTIONS,
+        "card_content_leaves":  _CARD_CONTENT_LEAVES,
+        "card_content_labels":  _CARD_CONTENT_LABELS,
         "creation_mode_verbosity_options": _CREATION_MODE_VERBOSITY_OPTIONS,
         "word_sources":         _WORD_SOURCE_OPTIONS,
         "markdown_extraction_modes": _MARKDOWN_EXTRACTION_OPTIONS,
@@ -2422,61 +2486,36 @@ def configure_generation():
     ])
 
 
-class _WordTestingPicker(_tui.Picker):
-    """Combines CREATION_MODE + CARD_TYPE into one choice — the
-    word_meaning-family options need both keys written together."""
+class _CardContentPicker(_tui.Picker):
+    """One axis (content/front/back/card_type) of the Card Content screen.
+    `options` is a property re-derived from live config state on every
+    render — _tui.Picker's render()/_idx()/_display() already re-read
+    `config` fresh each frame (tui.py's _run_inner() loop), so making
+    `options` dynamic too is enough to make all 4 pickers cascade off each
+    other with no new widget infrastructure."""
+
+    def __init__(self, label, axis):
+        self.label, self.axis, self.hint, self.config_key = label, axis, '', None
+
+    @property
+    def options(self):
+        return _card_content_axis_options(self.axis, _card_content_current_leaf())
 
     def _idx(self):
-        mode = getattr(config, 'CREATION_MODE', 'word_meaning')
-        val = f"word_meaning:{getattr(config, 'CARD_TYPE', 'basic')}" if mode == 'word_meaning' else mode
-        for i, (v, _) in enumerate(self.options):
-            if v == val:
-                return i
-        return 0
+        leaf = _card_content_current_leaf()
+        return next((i for i, (v, _) in enumerate(self.options) if v == leaf[self.axis]), 0)
 
     def _set(self, idx):
-        value = self.options[idx % len(self.options)][0]
-        if ':' in value:
-            mode, card_type = value.split(':', 1)
-            write_config('CREATION_MODE', mode)
-            write_config('CARD_TYPE', card_type)
-        else:
-            write_config('CREATION_MODE', value)
-
-
-def _word_content_hint():
-    mode = current_creation_mode()
-    if mode not in _WORD_FAMILY_MODES:
-        return ''
-    key = f"word_meaning:{config.CARD_TYPE}" if mode == "word_meaning" else mode
-    return dict(_WORD_TESTING_OPTIONS).get(key, mode)
-
-
-def _phrase_content_hint():
-    mode = current_creation_mode()
-    return dict(_PHRASE_TESTING_OPTIONS).get(mode, '') if mode in _PHRASE_FAMILY_MODES else ''
-
-
-def _configure_word_content():
-    _tui.run_menu('Word-Based Cards', [
-        _WordTestingPicker('How do you want to be tested?', 'CREATION_MODE', _WORD_TESTING_OPTIONS),
-        _tui.Separator(),
-        _tui.Back(),
-    ])
-
-
-def _configure_phrase_content():
-    _tui.run_menu('Phrase-Based Cards', [
-        _tui.Picker('How do you want to be tested?', 'CREATION_MODE', _PHRASE_TESTING_OPTIONS),
-        _tui.Separator(),
-        _tui.Back(),
-    ])
+        opts = self.options
+        _card_content_set_axis(self.axis, opts[idx % len(opts)][0])
 
 
 def configure_card_content():
     _tui.run_menu('Card Content', [
-        _tui.Action('Word-based cards',   _configure_word_content,   _word_content_hint),
-        _tui.Action('Phrase-based cards', _configure_phrase_content, _phrase_content_hint),
+        _CardContentPicker('Content', 'content'),
+        _CardContentPicker('Front', 'front'),
+        _CardContentPicker('Back', 'back'),
+        _CardContentPicker('Card type', 'card_type'),
         _tui.Separator(),
         _tui.Picker('Field verbosity', 'CREATION_MODE_VERBOSITY', _CREATION_MODE_VERBOSITY_OPTIONS,
                     hint='Simple/complete fields — audio & production styles only'),
@@ -2555,7 +2594,7 @@ def configure_main():
                              + ('' if not ai_key_missing() else '  ! key missing'))),
         _tui.Action('Card content',
                     configure_card_content,
-                    lambda: (_word_content_hint() or _phrase_content_hint())),
+                    _card_content_hint),
         _tui.Action('Deck & cards',
                     configure_deck,
                     lambda: config.CARD_TEMPLATE),

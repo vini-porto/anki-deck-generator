@@ -148,7 +148,7 @@ CARD_TEMPLATE = "dark"
 #    "cloze"          — fill-in-the-blank using example sentences
 # ─────────────────────────────────────────────────────────────
 
-CARD_TYPE = "basic_reversed"
+CARD_TYPE = "basic"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -171,7 +171,7 @@ CARD_TYPE = "basic_reversed"
 #                               its correct written translation on the back
 # ─────────────────────────────────────────────────────────────
 
-CREATION_MODE = "phrase_audio_recognition"
+CREATION_MODE = "word_meaning"
 
 # CREATION_MODE_VERBOSITY only affects the 4 audio/production modes above
 # (audio_meaning, audio_writing, audio_typing, phrase_native_writing) —
