@@ -8,7 +8,7 @@
             AI-powered Anki flashcard deck generator
 ```
 
-[![Version](https://img.shields.io/badge/version-2.4.1-blueviolet?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.5.0-blueviolet?style=flat-square)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![AI](https://img.shields.io/badge/AI-Groq%20%7C%20OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama-orange?style=flat-square)](https://console.groq.com)
@@ -17,7 +17,7 @@
 
 **AI-generated flashcards for any language** · example sentences · IPA · audio · animated GIFs · synonyms · gender · POS tags · interactive terminal UI
 
-[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Categories & Subdecks](#categories--subdecks) · [Local TTS](#local-tts-pocket-tts) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Versioning](#versioning) · [Roadmap](#roadmap)
+[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Categories & Subdecks](#categories--subdecks) · [Local TTS](#local-tts-pocket-tts) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Roadmap](#roadmap)
 
 ---
 
@@ -185,6 +185,81 @@ Choose the Anki note type when exporting. The card type can be changed per-expor
 
 ---
 
+## Creation modes
+
+Controls *what* the AI is asked to generate and what becomes the card's front
+(stimulus) vs. back (answer) — a third axis independent of card type
+(mechanics, above) and card template (visuals, below). Stored as
+`CREATION_MODE` (+ `CARD_TYPE` for the Word-based family) in config.py, but
+both interactive menus present it as a guided 2-step choice under
+**Configure → Card content** rather than one long flat list:
+
+1. **What's the card about? Word or Phrase.**
+2. **How do you want to be tested?** — a list filtered to whichever content
+   unit you picked.
+
+| Content | Testing style | Front | Back |
+|---|---|---|---|
+| Word | See the meaning | The word | Its meaning, example sentence, audio, etc. |
+| Word | See the meaning, both directions | The word **and** its meaning (2 cards per note) | Whichever side wasn't shown |
+| Word | See the meaning, type the word | Its meaning + a box to type the word | Anki auto-checks your spelling |
+| Word | Fill in the blank in a sentence | The example sentence with the word blanked out | The full sentence + meaning |
+| Word | Hear it, recall the meaning | The word's audio only | Its meaning, example sentence, audio, etc. |
+| Word | Hear it, recall the spelling | The word's audio only | Its written form/spelling (+ IPA, gender, synonyms) |
+| Word | Hear it, type what you heard | The word's audio + a box to type into | Anki auto-checks your answer against the word's spelling |
+| Phrase | See the meaning in context | A natural example phrase with the word highlighted, plus its audio | The word's dictionary form, meaning in context, and the phrase's translation |
+| Phrase | Write the translation | A phrase in your native language | Its correct written translation into the language you're learning, plus audio |
+| Phrase | Hear it, recall the phrase | The phrase's audio only | The phrase text, in context |
+| Phrase | Hear it, type what you heard | The phrase's audio + a box to type into | Anki auto-checks your answer against the phrase |
+
+The first 4 "Word" testing styles are `CARD_TYPE`'s basic/basic_reversed/
+type_answer/cloze variants — they only apply to the Word content unit; every
+other testing style has its own single, fixed card shape. Every mode still
+centers on one anchor word, so part-of-speech tags and category subdecks
+keep working the same way no matter which mode generated the card.
+
+Every style except the first 4 ("See the meaning"/"...both directions"/
+"...type the word"/"Fill in the blank") also respects `CREATION_MODE_VERBOSITY`
+(Configure → Card content):
+
+- **Complete** (default) — every applicable field is filled in (IPA,
+  gender, synonyms, and — where relevant — the full example/translation)
+- **Simple** — only the essential field(s) for that style, everything else
+  omitted (and, since the omitted text is never generated, no wasted TTS
+  calls for audio that would never be shown)
+
+---
+
+## Word sources
+
+Controls *where candidate words come from* — independent of creation mode
+(above), which controls what happens to a word once it's picked. Set via
+`WORD_SOURCE` in config.py, or Configure → Generation in either interactive
+menu.
+
+| Source | Behavior |
+|---|---|
+| **Frequency word list** (default) | Top `TOTAL_WORD_POOL` most-frequent words for `SOURCE_LANG`, via `wordfreq` |
+| **Markdown notes / Obsidian vault** | Scans `MARKDOWN_NOTES_PATH` recursively for `*.md` files and builds the pool from those instead — useful if you already keep reading/vocabulary notes in Obsidian or a similar app and want cards built from words you've actually encountered, not a generic corpus |
+
+When using markdown notes, `MARKDOWN_EXTRACTION_MODE` controls how words are
+pulled out of your notes:
+
+- **Highlights** (recommended, default) — only text wrapped in Obsidian's
+  `==highlight==` syntax. High-signal: you already chose which words matter.
+- **All words** — every word in your notes, ranked by how often it appears.
+  Noisier — with no curation, common function words ("de", "le", "que"...)
+  tend to dominate, since a personal-notes corpus isn't curated the way
+  `wordfreq`'s frequency corpus is.
+
+`TOTAL_WORD_POOL` still caps the pool size in either mode.
+
+**Known limitation**: there is no lemmatization/stemming. A conjugated verb
+or plural noun found in your notes is treated as its own distinct word from
+its dictionary form (e.g. "mangera" won't be recognized as "manger").
+
+---
+
 ## Card templates
 
 Controls the visual layout of your cards, independently of the card type.
@@ -339,15 +414,26 @@ TTS_TARGET_LANG  = "en"        # gTTS code for native language audio
 AI_MODEL        = "llama-3.3-70b-versatile"  # used when AI_PROVIDER = "groq"
 OPENAI_MODEL    = "gpt-4o-mini"              # used when AI_PROVIDER = "openai"
 ANTHROPIC_MODEL = "claude-haiku-4-5"         # used when AI_PROVIDER = "anthropic"
-GEMINI_MODEL    = "gemini-2.5-flash-lite"    # used when AI_PROVIDER = "gemini" (free tier shifts often)
+GEMINI_MODEL    = "gemini-3.5-flash-lite"    # used when AI_PROVIDER = "gemini" (free tier shifts often)
 OLLAMA_MODEL    = "llama3.1"                 # used when AI_PROVIDER = "ollama"
 OLLAMA_HOST     = "http://localhost:11434"   # local Ollama server address
 
 WORDS_PER_RUN   = 50           # words processed per run
-TOTAL_WORD_POOL = 2000         # total frequency pool size
+TOTAL_WORD_POOL = 2000         # total pool size (either word source)
+MEANING_EXHAUSTIVENESS = "important"  # essential | important | all — meanings (cards) per word
+
+WORD_SOURCE             = "frequency_list"  # frequency_list | markdown_notes — see Word sources
+MARKDOWN_NOTES_PATH     = ""                # folder scanned recursively for *.md files
+MARKDOWN_EXTRACTION_MODE = "highlights"     # highlights | all_words
 
 CARD_TEMPLATE = "dark"         # dark | light | minimal | immersive
-CARD_TYPE     = "basic"        # basic | basic_reversed | type_answer | cloze
+CARD_TYPE     = "basic"        # basic | basic_reversed | type_answer | cloze — Word-based cards only
+CREATION_MODE = "word_meaning" # word_meaning | phrase_context | audio_meaning | audio_writing |
+                                # audio_typing | phrase_native_writing | phrase_audio_recognition |
+                                # phrase_audio_typing
+CREATION_MODE_VERBOSITY = "complete"  # complete | simple — audio/production styles only
+# Both settings above are best edited via Configure -> Card content in
+# either interactive menu (a guided flow), not by hand — see Creation modes.
 
 ENABLE_CATEGORIES = True       # AI-tagged subdecks + topic:: tags (e.g. "Phrasal Verbs")
 
@@ -398,35 +484,21 @@ GIPHY_API_KEY     = "your_giphy_api_key_here"
 
 ---
 
-## Versioning
-
-The current release — **v2.4.1** — is tracked in a single `VERSION` file at
-the repo root, so it never drifts between the two frontends. Both
-interactive menus read it from there and show it in their title banner (the
-curses menu via `tui.py`, the JS TUI via the `--options-json` bridge flag),
-and this README's version badge is updated alongside it.
-
-Releases follow [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`:
-
-- **MAJOR** — breaking changes or a fundamentally redesigned experience
-- **MINOR** — new backward-compatible features
-- **PATCH** — fixes and small refinements
-
-See [CHANGELOG.md](CHANGELOG.md) for the full release history.
-
----
-
 ## Roadmap
 
 Future goals for this project. Completed items are struck through.
 
-- [ ] Add multiple card creation modes beyond the current word-to-meaning + audio mode — e.g. phrase-and-context mode, audio-to-meaning mode, audio-to-writing mode, etc. Modes that don't fit the existing POS/category organization should still center on one highlighted word
-- [ ] Let the user choose how exhaustively meanings are generated per word — all possible meanings, only the most important ones, or just the essential one(s) — instead of the current fixed cap
+- [x] ~~Add multiple card creation modes beyond the current word-to-meaning + audio mode~~ — the `CREATION_MODE` framework shipped, with **Word → Meaning** (default) and **Phrase in Context** live; every mode centers on one highlighted anchor word so POS/category tagging keeps working unchanged — see [Creation modes](#creation-modes)
+- [x] ~~Add the remaining planned creation modes: `audio_meaning`, Audio recognition, Audio recognition typing, and Write response, each with a simple and a complete field-verbosity version~~ — all 4 shipped, see [Creation modes](#creation-modes)
+- [x] ~~Add phrase-level audio drills (listen to a phrase / type a phrase you heard, matching the word-level ones) and simplify how card content is configured~~ — **Phrase Audio Recognition** and **Phrase Audio Recognition Typing** shipped, and Configure → Card content now guides you through "Word or phrase?" then "how tested?" instead of one long flat list — see [Creation modes](#creation-modes)
+- [x] ~~Let the user choose how exhaustively meanings are generated per word — all possible meanings, only the most important ones, or just the essential one(s) — instead of the current fixed cap~~ — see `MEANING_EXHAUSTIVENESS` in [Configuration reference](#configuration-reference)
 - [x] ~~Add multiple realistic AI-generated voices, produced **locally** (no cloud TTS dependency)~~ — see [Local TTS (Pocket TTS)](#local-tts-pocket-tts)
 - [ ] Add [AnkiConnect](https://ankiweb.net/shared/info/2055492159) support to export/import cards directly into a running Anki instance, without producing a `.apkg` file first — offered **alongside** the existing `.apkg` export, not replacing it
 - [x] ~~Add a beautiful interactive menu (TUI) built with JavaScript~~ — see [JavaScript TUI](#javascript-tui)
 - [x] ~~Include more templates for cards~~ — 4 available: dark, light, minimal, immersive
 - [x] ~~Categorize cards into language-specific subfolders/subdecks (e.g. "Phrasal Verbs", "Verb Conjugation" for English) and track the category in Anki tags~~ — see [Categories & subdecks](#categories--subdecks)
+- [x] ~~Generate flashcards from the user's own markdown notes (e.g. an Obsidian vault) instead of only a frequency word list~~ — the `WORD_SOURCE` axis shipped, with **Frequency word list** (default) and **Markdown notes / Obsidian vault** (highlights or all-words extraction) — see [Word sources](#word-sources)
+- [ ] Pass the *actual sentence* a markdown-sourced word was found in through to the AI prompt as authentic context, instead of discarding it once the word pool is built — would let **Phrase in Context** reuse the user's real example sentence instead of an AI-invented one
 
 ---
 

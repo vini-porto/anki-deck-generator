@@ -31,9 +31,11 @@ import sys
 import time
 import json
 import zlib
+import shutil
 import sqlite3
 import hashlib
 import requests
+from collections import Counter
 import genanki
 from gtts import gTTS
 from wordfreq import top_n_list
@@ -59,7 +61,9 @@ _CODES = {
     'blue':   '\033[94m',
     'reset':  '\033[0m',
 }
-_W = 58  # visible width of box interior (between the ║ borders)
+_W = 58  # minimum visible width of box interior (between the ║ borders) —
+         # print_banner() widens this automatically for unusually long
+         # content (e.g. a long AI model name) so the box never overflows
 
 
 def col(text, *codes):
@@ -76,13 +80,13 @@ def _clear():
     print('\033[2J\033[H', end='', flush=True)
 
 
-def _hline(ch='═'):
-    return ch * _W
+def _hline(ch='═', width=_W):
+    return ch * width
 
 
-def _row(text=''):
+def _row(text='', width=_W):
     """Format one box row. text may contain ANSI codes; padding uses visible length."""
-    pad = _W - 2 - _vlen(text)
+    pad = width - 2 - _vlen(text)
     return f'║ {text}{" " * max(0, pad)} ║'
 
 
@@ -93,13 +97,15 @@ def print_banner():
     tmpl     = col(f'  Template : {config.CARD_TEMPLATE}   |   Card type : {config.CARD_TYPE}', 'dim')
     provider = AI_PROVIDER_LABELS.get(current_ai_provider(), current_ai_provider())
     model    = col(f'  AI provider : {provider}   |   Model : {current_ai_model()}', 'dim')
-    print('╔' + _hline() + '╗')
-    print(_row(title))
-    print('╠' + _hline() + '╣')
-    print(_row(lang))
-    print(_row(tmpl))
-    print(_row(model))
-    print('╚' + _hline() + '╝')
+    lines = [title, lang, tmpl, model]
+    width = max(_W, max(_vlen(t) for t in lines) + 2)
+    print('╔' + _hline(width=width) + '╗')
+    print(_row(title, width))
+    print('╠' + _hline(width=width) + '╣')
+    print(_row(lang, width))
+    print(_row(tmpl, width))
+    print(_row(model, width))
+    print('╚' + _hline(width=width) + '╝')
     print()
 
 
@@ -139,9 +145,106 @@ def pause():
 #  Database
 # ─────────────────────────────────────────────
 
+def _migrate_to_creation_mode_schema(conn):
+    """One-time, irreversible rebuild of `cards`: the old UNIQUE(word,
+    meaning_id) can't express per-creation_mode dedup (see § Creation modes
+    in CLAUDE.md), and SQLite can't ALTER a UNIQUE constraint in place, so
+    this does a real create/copy/drop/rename migration — the first one this
+    codebase has ever needed (every prior schema change was an additive
+    soft `ALTER TABLE ADD COLUMN`, safe to keep re-running forever).
+
+    No-ops for a brand-new DB (no `cards` table yet — the CREATE TABLE IF
+    NOT EXISTS right after this call builds the new schema directly) or a
+    DB that's already been migrated (`content_key` column already present).
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(cards)").fetchall()}
+    if not cols or "content_key" in cols:
+        return
+
+    print(col("  [INFO] Migrating progress.db to the new creation_mode schema "
+               "(one-time, irreversible)...", 'yellow'))
+    try:
+        backup_path = config.DB_PATH + ".pre-creation-mode-migration.bak"
+        if not os.path.exists(backup_path):
+            shutil.copy2(config.DB_PATH, backup_path)
+            print(col(f"  [INFO] Backup written to {backup_path}", 'dim'))
+    except Exception as e:
+        print(col(f"  [WARN] Could not write migration backup: {e}", 'yellow'))
+
+    # Guarantee every column the copy statement below reads actually exists
+    # on the legacy table, even for a DB that predates some of these
+    # (already-soft-migrated-elsewhere) columns.
+    legacy_migrations = [
+        ("word_label",               "TEXT DEFAULT ''"),
+        ("pos",                      "TEXT DEFAULT ''"),
+        ("gif_url",                  "TEXT DEFAULT ''"),
+        ("gif_raw_url",              "TEXT DEFAULT ''"),
+        ("gender",                   "TEXT DEFAULT ''"),
+        ("text_example_translation", "TEXT DEFAULT ''"),
+        ("exported",                 "INTEGER DEFAULT 0"),
+        ("category",                 "TEXT DEFAULT ''"),
+    ]
+    for column, definition in legacy_migrations:
+        try:
+            conn.execute(f"ALTER TABLE cards ADD COLUMN {column} {definition}")
+        except Exception:
+            pass
+
+    conn.execute("DROP TABLE IF EXISTS cards_new")
+    conn.execute("""
+        CREATE TABLE cards_new (
+            id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+            word                     TEXT    NOT NULL,
+            word_label               TEXT    NOT NULL,
+            meaning_id               INTEGER NOT NULL,
+            pos                      TEXT    DEFAULT '',
+            ipa                      TEXT    DEFAULT '',
+            text_meaning             TEXT    DEFAULT '',
+            text_example_phrase      TEXT    DEFAULT '',
+            text_example_translation TEXT    DEFAULT '',
+            synonyms                 TEXT    DEFAULT '',
+            audio_word               TEXT    DEFAULT '',
+            audio_meaning            TEXT    DEFAULT '',
+            audio_example            TEXT    DEFAULT '',
+            gif_url                  TEXT    DEFAULT '',
+            gif_raw_url              TEXT    DEFAULT '',
+            gender                   TEXT    DEFAULT '',
+            category                 TEXT    DEFAULT '',
+            exported                 INTEGER DEFAULT 0,
+            date_added               TEXT    DEFAULT (date('now')),
+            creation_mode            TEXT    NOT NULL DEFAULT 'word_meaning',
+            content_key              TEXT    NOT NULL,
+            source_phrase            TEXT,
+            UNIQUE(creation_mode, content_key, meaning_id)
+        )
+    """)
+    conn.execute("""
+        INSERT INTO cards_new (
+            id, word, word_label, meaning_id, pos, ipa,
+            text_meaning, text_example_phrase, text_example_translation,
+            synonyms, audio_word, audio_meaning, audio_example,
+            gif_url, gif_raw_url, gender, category, exported, date_added,
+            creation_mode, content_key, source_phrase
+        )
+        SELECT
+            id, word, word_label, meaning_id, pos, ipa,
+            text_meaning, text_example_phrase, text_example_translation,
+            synonyms, audio_word, audio_meaning, audio_example,
+            gif_url, gif_raw_url, gender, category, exported, date_added,
+            'word_meaning', LOWER(TRIM(word)), NULL
+        FROM cards
+    """)
+    conn.execute("DROP TABLE cards")
+    conn.execute("ALTER TABLE cards_new RENAME TO cards")
+    conn.commit()
+    print(col("  [OK] Migration complete — every existing card is now "
+               "creation_mode='word_meaning', matching its prior behavior.", 'green'))
+
+
 def init_db():
     """Initialize SQLite database and apply any pending migrations."""
     conn = sqlite3.connect(config.DB_PATH)
+    _migrate_to_creation_mode_schema(conn)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS cards (
             id                       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,9 +263,13 @@ def init_db():
             gif_url                  TEXT    DEFAULT '',
             gif_raw_url              TEXT    DEFAULT '',
             gender                   TEXT    DEFAULT '',
+            category                 TEXT    DEFAULT '',
             exported                 INTEGER DEFAULT 0,
             date_added               TEXT    DEFAULT (date('now')),
-            UNIQUE(word, meaning_id)
+            creation_mode            TEXT    NOT NULL DEFAULT 'word_meaning',
+            content_key              TEXT    NOT NULL,
+            source_phrase            TEXT,
+            UNIQUE(creation_mode, content_key, meaning_id)
         )
     """)
     conn.execute("""
@@ -192,10 +299,10 @@ def init_db():
     return conn
 
 
-def card_exists(conn, word, meaning_id):
+def card_exists(conn, creation_mode, content_key, meaning_id):
     return conn.execute(
-        "SELECT 1 FROM cards WHERE word=? AND meaning_id=?",
-        (word, meaning_id)
+        "SELECT 1 FROM cards WHERE creation_mode=? AND content_key=? AND meaning_id=?",
+        (creation_mode, content_key, meaning_id)
     ).fetchone() is not None
 
 
@@ -211,8 +318,9 @@ def save_card(conn, data):
             (word, word_label, meaning_id, pos, ipa,
              text_meaning, text_example_phrase, text_example_translation,
              synonyms, audio_word, audio_meaning, audio_example,
-             gif_url, gif_raw_url, gender, category)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             gif_url, gif_raw_url, gender, category,
+             creation_mode, content_key, source_phrase)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         data["word"],
         data.get("word_label", data["word"]),
@@ -230,28 +338,51 @@ def save_card(conn, data):
         data.get("gif_raw_url", ""),
         data.get("gender", ""),
         data.get("category", ""),
+        data["creation_mode"],
+        data["content_key"],
+        data.get("source_phrase"),
     ))
     conn.commit()
 
 
-def get_processed_words(conn):
-    rows = conn.execute("SELECT DISTINCT word FROM cards").fetchall()
+def get_processed_words(conn, creation_mode):
+    """Words already used as an anchor *in this specific creation_mode*.
+    Deliberately per-mode, not global: a word already anchoring a
+    word_meaning card must remain eligible to anchor a phrase_context card
+    too (each mode's spaced repetition is independent — see § Creation
+    modes in CLAUDE.md)."""
+    rows = conn.execute(
+        "SELECT DISTINCT word FROM cards WHERE creation_mode=?", (creation_mode,)
+    ).fetchall()
     return {r[0] for r in rows}
 
 
-def get_all_cards(conn, new_only=False):
+def get_all_cards(conn, new_only=False, creation_mode=None):
+    # text_example_phrase is required for word_meaning/phrase_context/etc.,
+    # but modes that declare "text_example" in always_omit (audio_writing,
+    # audio_typing) never populate it by design — this filter would
+    # otherwise silently exclude every one of their cards from every export.
+    mode_def = CREATION_MODES.get(creation_mode, {}) if creation_mode else {}
+    needs_example = "text_example" not in mode_def.get("always_omit", ())
+    example_clause = (
+        "AND text_example_phrase NOT LIKE '[no sentence]%' AND text_example_phrase != ''"
+        if needs_example else ""
+    )
     filter_clause = "AND exported = 0" if new_only else ""
+    mode_clause = "AND creation_mode = ?" if creation_mode else ""
+    params = (creation_mode,) if creation_mode else ()
     return conn.execute(f"""
         SELECT word_label, ipa, text_meaning, text_example_phrase,
                text_example_translation, synonyms, audio_word,
                audio_meaning, audio_example, gif_url, gif_raw_url,
                gender, category, word, id
         FROM cards
-        WHERE text_example_phrase NOT LIKE '[no sentence]%'
-          AND text_example_phrase != ''
+        WHERE 1=1
+          {example_clause}
           {filter_clause}
+          {mode_clause}
         ORDER BY id
-    """).fetchall()
+    """, params).fetchall()
 
 
 def mark_as_exported(conn, ids):
@@ -387,14 +518,47 @@ def ai_key_missing():
     return getattr(config, field, "").startswith("your_")
 
 
+# Per MEANING_EXHAUSTIVENESS level: how the prompt asks for meanings, the
+# hard cap enforced in the Rules section, and the AI token budget. "all"
+# still caps at a finite number rather than truly "every sense" — an
+# unbounded prompt for a word like "the" can ask for dozens of technical
+# senses and blow through any token budget into truncated/invalid JSON (see
+# CHANGELOG's original meaning-cap fix), so "all" means "generous", not
+# "unlimited". The larger max_tokens for "all" gives that generous cap
+# headroom to actually complete instead of truncating.
+MEANING_EXHAUSTIVENESS_SETTINGS = {
+    "essential": {
+        "label":        "Essential only",
+        "max_meanings": 1,
+        "instruction":  ('generate flashcard data for only its single most essential, most '
+                          'commonly used meaning — the one a learner needs first'),
+        "max_tokens":   1024,
+    },
+    "important": {
+        "label":        "Most important",
+        "max_meanings": 5,
+        "instruction":  ('generate flashcard data for its distinct and relevant meanings — at '
+                          'most the 5 most common and useful ones for a learner (fewer if the '
+                          "word doesn't have that many)"),
+        "max_tokens":   2048,
+    },
+    "all": {
+        "label":        "All meanings",
+        "max_meanings": 12,
+        "instruction":  ('generate flashcard data for every genuinely distinct meaning a '
+                          'learner would realistically encounter — up to 12 (fewer if the word '
+                          "doesn't have that many)"),
+        "max_tokens":   4096,
+    },
+}
+
+
 PROMPT_TEMPLATE = """You are a language expert creating Anki flashcard content \
 for {target_lang} speakers learning {source_lang}.
 
-For the word "{word}", generate flashcard data for its distinct and relevant meanings — at \
-most the 5 most common and useful ones for a learner (fewer if the word doesn't have that many). \
-Extremely common function/grammar words (e.g. articles, prepositions, auxiliary verbs) can have \
-dozens of technical senses; do not enumerate all of them — pick the handful that are actually \
-worth a separate flashcard.
+For the word "{word}", {meaning_instruction}. Even extremely common function/grammar words \
+(e.g. articles, prepositions, auxiliary verbs) that technically have dozens of senses must stay \
+within that limit — pick only the ones that are genuinely worth a separate flashcard.
 
 Return ONLY a valid JSON object (no markdown, no explanation) with this exact structure:
 {{
@@ -430,7 +594,7 @@ Example for someone teasing: ['teasing', 'laughing', 'school']."]
 
 Rules:
 - Only include meanings that are genuinely distinct and useful for a language learner
-- Never return more than 5 meanings, even for words with many technical senses
+- Never return more than {max_meanings} meaning(s), even for words with many technical senses
 - The example sentence must clearly illustrate the specific meaning listed
 - Synonyms must be in {source_lang}
 - IPA must be standard {source_lang} IPA notation
@@ -445,6 +609,114 @@ the meaning is truly a distinct study block not covered by an existing one
 - Return raw JSON only — no markdown fences, no extra text"""
 
 
+PROMPT_TEMPLATE_PHRASE_CONTEXT = """You are a language expert creating Anki flashcard content \
+for {target_lang} speakers learning {source_lang}.
+
+For the word "{word}", generate up to {max_meanings} distinct example phrases that naturally use \
+this word in different real-world contexts (fewer if that many genuinely distinct contexts don't \
+exist). In each phrase, wrap the EXACT inflected/conjugated surface form you actually used with \
+double asterisks, e.g. "Elle a **couru** jusqu'à la gare." — wrap only that one occurrence, using \
+the literal form as it appears in your sentence (which may differ from the dictionary/citation \
+form given above, since word forms change with conjugation, gender, number, etc.).
+
+Return ONLY a valid JSON object (no markdown, no explanation) with this exact structure:
+{{
+  "ipa": "IPA transcription for {source_lang} pronunciation of the dictionary form (e.g. mɛ.zɔ̃)",
+  "pos": "part of speech in English (Noun / Verb / Adjective / Adverb / etc.) of the dictionary form",
+  "gender": "For nouns only: 'Masculine' or 'Feminine'. Empty string for all other parts of speech.",
+  "phrases": [
+    {{
+      "phrase": "A natural sentence in {source_lang} (10-15 words) using the word in a specific \
+context, with the exact inflected form wrapped in **double asterisks**.",
+      "phrase_translation": "The {target_lang} translation of the phrase above — natural, not \
+word-for-word literal.",
+      "text_meaning": "A single clear sentence written ENTIRELY in {target_lang} explaining what \
+the word means AS USED in this specific phrase. Do NOT include the {source_lang} word/term \
+itself anywhere in this sentence. Refer to it only implicitly: 'Means to ...' for verbs, \
+'Describes something/someone that is ...' for adjectives, 'Refers to ...' or 'A type of ...' \
+for nouns.",
+      "synonyms": "up to 6 relevant {source_lang} synonyms for the word as used in this context, \
+comma-separated",
+      "category": "A short, reusable study-block label (2-4 words, Title Case) for this phrase, \
+ONLY if it belongs to a recognizable grammar/vocabulary category specific to learning \
+{source_lang}. Leave as an empty string otherwise. {category_hint}",
+      "gif_keywords": ["exactly 3 English single-word keywords that together visually represent \
+this phrase's context. Focus on the action, object, and setting."]
+    }}
+  ]
+}}
+
+Rules:
+- Only include phrases that are genuinely distinct contexts, not near-duplicate sentences
+- Never return more than {max_meanings} phrase(s)
+- Each phrase must wrap exactly one occurrence of the word (in whatever inflected form it takes) \
+in double asterisks — do not wrap any other word in the sentence
+- Synonyms must be in {source_lang}
+- IPA must be standard {source_lang} IPA notation for the dictionary/citation form
+- gif_keywords must be exactly 3 English single words
+- gender must be 'Masculine' or 'Feminine' for nouns only, empty string otherwise
+- text_meaning must be written entirely in {target_lang} — never include the literal \
+{source_lang} word/term being defined
+- phrase_translation must be a natural {target_lang} translation of the phrase
+- category must reuse an existing category exactly (same spelling/casing) whenever it fits
+- Return raw JSON only — no markdown fences, no extra text"""
+
+
+PROMPT_TEMPLATE_PHRASE_NATIVE_WRITING = """You are a language expert creating Anki flashcard \
+content for {target_lang} speakers learning {source_lang}.
+
+For the word "{word}", generate up to {max_meanings} distinct sentences written ENTIRELY in \
+{target_lang} (the learner's native language) that would naturally prompt a learner to produce \
+this word in {source_lang} when translating the sentence. Then give the correct {source_lang} \
+translation of each sentence, wrapping the EXACT inflected/conjugated surface form of the word \
+you used with double asterisks, e.g. "Elle a **couru** jusqu'à la gare." — wrap only that one \
+occurrence, using the literal form as it appears in your translation (which may differ from the \
+dictionary/citation form given above, since word forms change with conjugation, gender, number, \
+etc.).
+
+Return ONLY a valid JSON object (no markdown, no explanation) with this exact structure:
+{{
+  "ipa": "IPA transcription for {source_lang} pronunciation of the dictionary form (e.g. mɛ.zɔ̃)",
+  "pos": "part of speech in English (Noun / Verb / Adjective / Adverb / etc.) of the dictionary form",
+  "gender": "For nouns only: 'Masculine' or 'Feminine'. Empty string for all other parts of speech.",
+  "phrases": [
+    {{
+      "native_phrase": "A natural sentence written ENTIRELY in {target_lang} (10-15 words) that \
+would prompt a learner to produce the word in {source_lang} when translating it.",
+      "correct_translation": "The correct {source_lang} translation of the sentence above, with \
+the exact inflected form of the word wrapped in **double asterisks**.",
+      "text_meaning": "A single clear sentence written ENTIRELY in {target_lang} explaining what \
+the word means AS USED in this translation. Do NOT include the {source_lang} word/term itself \
+anywhere in this sentence. Refer to it only implicitly: 'Means to ...' for verbs, 'Describes \
+something/someone that is ...' for adjectives, 'Refers to ...' or 'A type of ...' for nouns.",
+      "synonyms": "up to 6 relevant {source_lang} synonyms for the word as used in this context, \
+comma-separated",
+      "category": "A short, reusable study-block label (2-4 words, Title Case) for this phrase, \
+ONLY if it belongs to a recognizable grammar/vocabulary category specific to learning \
+{source_lang}. Leave as an empty string otherwise. {category_hint}",
+      "gif_keywords": ["exactly 3 English single-word keywords that together visually represent \
+this sentence's context. Focus on the action, object, and setting."]
+    }}
+  ]
+}}
+
+Rules:
+- Only include sentences that are genuinely distinct contexts, not near-duplicates
+- Never return more than {max_meanings} sentence(s)
+- native_phrase must be written entirely in {target_lang} — never include the literal \
+{source_lang} word/term being tested
+- correct_translation must wrap exactly one occurrence of the word (in whatever inflected form \
+it takes) in double asterisks — do not wrap any other word in the sentence
+- Synonyms must be in {source_lang}
+- IPA must be standard {source_lang} IPA notation for the dictionary/citation form
+- gif_keywords must be exactly 3 English single words
+- gender must be 'Masculine' or 'Feminine' for nouns only, empty string otherwise
+- text_meaning must be written entirely in {target_lang} — never include the literal \
+{source_lang} word/term being defined
+- category must reuse an existing category exactly (same spelling/casing) whenever it fits
+- Return raw JSON only — no markdown fences, no extra text"""
+
+
 def _clean_json_text(raw):
     raw = raw.strip()
     raw = re.sub(r"^```(?:json)?", "", raw).strip()
@@ -452,11 +724,11 @@ def _clean_json_text(raw):
     return json.loads(raw)
 
 
-def _call_groq(prompt):
+def _call_groq(prompt, max_tokens=2048):
     payload = {
         "model":       config.AI_MODEL,
         "temperature": 0.3,
-        "max_tokens":  2048,
+        "max_tokens":  max_tokens,
         "messages":    [{"role": "user", "content": prompt}],
     }
     resp = requests.post(GROQ_URL, headers=AI_HEADERS, json=payload, timeout=30)
@@ -466,7 +738,7 @@ def _call_groq(prompt):
     return resp.json()["choices"][0]["message"]["content"]
 
 
-def _call_openai(prompt):
+def _call_openai(prompt, max_tokens=2048):
     headers = {
         "Authorization": f"Bearer {config.OPENAI_API_KEY}",
         "Content-Type":  "application/json",
@@ -474,7 +746,7 @@ def _call_openai(prompt):
     payload = {
         "model":       config.OPENAI_MODEL,
         "temperature": 0.3,
-        "max_tokens":  2048,
+        "max_tokens":  max_tokens,
         "messages":    [{"role": "user", "content": prompt}],
     }
     resp = requests.post(OPENAI_URL, headers=headers, json=payload, timeout=30)
@@ -484,7 +756,7 @@ def _call_openai(prompt):
     return resp.json()["choices"][0]["message"]["content"]
 
 
-def _call_anthropic(prompt):
+def _call_anthropic(prompt, max_tokens=2048):
     try:
         import anthropic
     except ImportError:
@@ -493,7 +765,7 @@ def _call_anthropic(prompt):
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     response = client.messages.create(
         model=config.ANTHROPIC_MODEL,
-        max_tokens=2048,
+        max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
     return next((b.text for b in response.content if b.type == "text"), "")
@@ -519,16 +791,44 @@ def _gemini_retry_delay(resp):
     return None
 
 
+# Adaptive per-minute throttle for Gemini, on top of whatever DELAY_AI is set
+# to. DELAY_AI alone can't respect the free tier's RPM cap (e.g. 15 RPM for
+# gemini-2.5-flash-lite) since it's a single fixed value shared by every
+# provider, and users have no way to know the right number for whichever
+# model Google currently grants free quota to. Instead this ratchets up a
+# minimum spacing between requests every time a 429 is seen, so a long run
+# self-tunes down to a sustainable pace instead of hammering the same wall
+# every single word.
+_gemini_last_call_ts = 0.0
+_gemini_min_interval = 0.0
+
+
+def _gemini_throttle():
+    global _gemini_last_call_ts
+    wait = _gemini_min_interval - (time.time() - _gemini_last_call_ts)
+    if wait > 0:
+        time.sleep(wait)
+    _gemini_last_call_ts = time.time()
+
+
 def _gemini_post_with_retry(url, payload, max_retries=3):
     """POST to Gemini, retrying on 429 (rate limit) with the server's own
     suggested backoff. Returns the final response, whatever its status —
     the caller still has to handle non-200/non-429 outcomes."""
+    global _gemini_min_interval
     attempt = 0
     while True:
+        _gemini_throttle()
         resp = requests.post(
             url, params={"key": config.GEMINI_API_KEY}, json=payload, timeout=30
         )
-        if resp.status_code != 429 or attempt >= max_retries:
+        if resp.status_code != 429:
+            return resp
+        # Hitting 429 at all means the current pace is too fast for this
+        # key's quota — widen the floor for every future call this run, not
+        # just this retry loop, so later words don't repeat the same wait.
+        _gemini_min_interval = min(max(_gemini_min_interval * 1.5, 5.0), 30.0)
+        if attempt >= max_retries:
             return resp
         wait = _gemini_retry_delay(resp) or (5 * (attempt + 1))
         print(col(f"    [Gemini] Rate limited (429) — waiting {wait:.0f}s before "
@@ -537,18 +837,21 @@ def _gemini_post_with_retry(url, payload, max_retries=3):
         attempt += 1
 
 
-def _call_gemini(prompt):
+def _call_gemini(prompt, max_tokens=2048):
     url = GEMINI_URL_TMPL.format(model=config.GEMINI_MODEL)
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens},
     }
     resp = _gemini_post_with_retry(url, payload)
     if resp.status_code == 429:
         print(col(
             "    [Gemini] Still rate-limited after retrying — the free tier's "
-            "quota (per-minute or per-day) is exhausted. Wait a bit, raise "
-            "DELAY_AI in config.py, or switch AI_PROVIDER temporarily.", 'red'))
+            "quota (per-minute or per-day) is exhausted. Slowing down to "
+            f"1 request per {_gemini_min_interval:.0f}s for the rest of this run; "
+            "this word will be retried on the next run rather than being "
+            "skipped for good. Wait a bit, raise DELAY_AI in config.py, or "
+            "switch AI_PROVIDER temporarily if this keeps happening.", 'red'))
         return None
     if resp.status_code != 200:
         print(f"    [Gemini] HTTP {resp.status_code}: {resp.text[:300]}")
@@ -588,7 +891,7 @@ def _ollama_model_pulled(model):
         return True  # unreachable — let the real call below surface that error
 
 
-def _call_ollama(prompt):
+def _call_ollama(prompt, max_tokens=2048):
     host = config.OLLAMA_HOST.rstrip('/')
     if not _ollama_model_pulled(config.OLLAMA_MODEL):
         print(col(
@@ -602,7 +905,7 @@ def _call_ollama(prompt):
         "model":    config.OLLAMA_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "stream":   False,
-        "options":  {"temperature": 0.3},
+        "options":  {"temperature": 0.3, "num_predict": max_tokens},
     }
     try:
         # (connect timeout, read timeout) — connect fails fast if `ollama serve`
@@ -706,21 +1009,397 @@ def _build_category_hint(known_categories):
             f"something already covered.")
 
 
-def generate_card_content(word, known_categories=None):
+def current_meaning_exhaustiveness():
+    level = getattr(config, "MEANING_EXHAUSTIVENESS", "important")
+    return MEANING_EXHAUSTIVENESS_SETTINGS.get(level, MEANING_EXHAUSTIVENESS_SETTINGS["important"])
+
+
+def current_creation_mode():
+    mode = getattr(config, "CREATION_MODE", "word_meaning")
+    return mode if mode in CREATION_MODES else "word_meaning"
+
+
+# ─────────────────────────────────────────────
+#  Creation modes — what the AI is asked to generate, and what becomes the
+#  Front (stimulus) vs Back (answer) of the card. Structurally parallel to
+#  AI_PROVIDER_CALLERS above: one dict entry per mode, each pointing at its
+#  own prompt builder / response parser / dedup-key function / field
+#  extractor. Every mode still centers on one single anchor word — that's
+#  what vocab::<POS>/topic::<Category> tagging and subdeck routing hang
+#  off of, unmodified, regardless of which mode produced the card. See
+#  CLAUDE.md § Creation modes for how to add a new one.
+# ─────────────────────────────────────────────
+
+def _build_word_meaning_prompt(word, known_categories):
+    settings = current_meaning_exhaustiveness()
     prompt = PROMPT_TEMPLATE.format(
         word=word,
         source_lang=config.SOURCE_LANG,
         target_lang=config.TARGET_LANG,
-        category_hint=_build_category_hint(known_categories or []),
+        category_hint=_build_category_hint(known_categories),
+        meaning_instruction=settings["instruction"],
+        max_meanings=settings["max_meanings"],
     )
+    return prompt, settings["max_tokens"]
+
+
+def _parse_word_meaning_response(parsed):
+    return {"ipa": parsed.get("ipa", ""), "items": parsed.get("meanings", [])}
+
+
+def _content_key_word_meaning(word, item):
+    return word.strip().lower(), None
+
+
+def _word_meaning_extract(item):
+    text = item.get("text_example_phrase", "")
+    return {
+        "text_meaning": item.get("text_meaning", ""),
+        "text_example_phrase": text,
+        "text_example_translation": item.get("text_example_translation", ""),
+        "tts_example_text": text,
+    }
+
+
+def _build_phrase_context_prompt(word, known_categories):
+    settings = current_meaning_exhaustiveness()
+    prompt = PROMPT_TEMPLATE_PHRASE_CONTEXT.format(
+        word=word,
+        source_lang=config.SOURCE_LANG,
+        target_lang=config.TARGET_LANG,
+        category_hint=_build_category_hint(known_categories),
+        max_meanings=settings["max_meanings"],
+    )
+    return prompt, settings["max_tokens"]
+
+
+def _parse_phrase_context_response(parsed):
+    top_pos    = parsed.get("pos", "")
+    top_gender = parsed.get("gender", "")
+    items = [{
+        "pos": top_pos,
+        "gender": top_gender,
+        "phrase_raw": p.get("phrase", ""),
+        "phrase_translation": p.get("phrase_translation", ""),
+        "text_meaning": p.get("text_meaning", ""),
+        "synonyms": p.get("synonyms", ""),
+        "category": p.get("category", ""),
+        "gif_keywords": p.get("gif_keywords", []),
+    } for p in parsed.get("phrases", [])]
+    return {"ipa": parsed.get("ipa", ""), "items": items}
+
+
+def _content_key_phrase_context(word, item):
+    stripped = item.get("phrase_raw", "").replace("**", "").strip()
+    return hashlib.md5(stripped.lower().encode("utf-8")).hexdigest(), stripped
+
+
+def _phrase_context_extract(item):
+    raw = item.get("phrase_raw", "")
+    return {
+        "text_meaning": item.get("text_meaning", ""),
+        "text_example_phrase": raw,                          # stored WITH ** markers
+        "text_example_translation": item.get("phrase_translation", ""),
+        "tts_example_text": raw.replace("**", "").strip(),    # stripped for TTS
+    }
+
+
+_PHRASE_CONTEXT_FRONT = """
+<div class="example">{{Text_Example_Phrase}}</div>
+{{Sound_Example}}
+"""
+
+_PHRASE_CONTEXT_BACK = """
+{{FrontSide}}
+<hr>
+<div class="word">{{Word}}</div>
+<div class="ipa">/ {{IPA}} /</div>
+{{Gender}}
+<div class="gif-box">{{Image}}</div>
+<div class="meaning">{{Text_Meaning}}</div>
+<div class="example-translation">{{Text_Example_Translation}}</div>
+{{Sound_Word}}{{Sound_Meaning}}
+{{Synonyms}}
+"""
+
+
+# ─────────────────────────────────────────────
+#  audio_meaning / audio_writing / audio_typing — all 3 are still
+#  word-anchored and want exactly the content word_meaning already
+#  generates, so they reuse _build_word_meaning_prompt/
+#  _parse_word_meaning_response/_content_key_word_meaning/
+#  _word_meaning_extract verbatim (see CREATION_MODES below) — only their
+#  Front/Back differ (audio-first, some fields hidden via CREATION_MODE_
+#  VERBOSITY's always_omit/simple_omits, see _generate_loop()).
+# ─────────────────────────────────────────────
+
+_AUDIO_MEANING_FRONT = """
+{{Sound_Word}}
+"""
+
+_AUDIO_MEANING_BACK = """
+{{FrontSide}}
+<hr>
+<div class="word">{{Word}}</div>
+{{#IPA}}<div class="ipa">/ {{IPA}} /</div>{{/IPA}}
+{{Gender}}
+<div class="gif-box">{{Image}}</div>
+{{#Text_Meaning}}<div class="meaning">{{Text_Meaning}}</div>{{/Text_Meaning}}
+{{Sound_Meaning}}
+{{#Text_Example_Phrase}}<div class="example">{{Text_Example_Phrase}}</div>{{/Text_Example_Phrase}}
+{{#Text_Example_Translation}}<div class="example-translation">{{Text_Example_Translation}}</div>{{/Text_Example_Translation}}
+{{Sound_Example}}
+{{Synonyms}}
+"""
+
+_AUDIO_WRITING_FRONT = """
+{{Sound_Word}}
+"""
+
+_AUDIO_WRITING_BACK = """
+{{FrontSide}}
+<hr>
+<div class="word">{{Word}}</div>
+{{#IPA}}<div class="ipa">/ {{IPA}} /</div>{{/IPA}}
+{{Gender}}
+<div class="gif-box">{{Image}}</div>
+{{Synonyms}}
+"""
+
+_AUDIO_TYPING_FRONT = """
+{{Sound_Word}}
+<br>
+{{type:Word}}
+"""
+
+_AUDIO_TYPING_BACK = _AUDIO_WRITING_BACK   # identical reveal — only the Front differs
+
+
+def _build_phrase_native_writing_prompt(word, known_categories):
+    settings = current_meaning_exhaustiveness()
+    prompt = PROMPT_TEMPLATE_PHRASE_NATIVE_WRITING.format(
+        word=word,
+        source_lang=config.SOURCE_LANG,
+        target_lang=config.TARGET_LANG,
+        category_hint=_build_category_hint(known_categories),
+        max_meanings=settings["max_meanings"],
+    )
+    return prompt, settings["max_tokens"]
+
+
+def _parse_phrase_native_writing_response(parsed):
+    top_pos    = parsed.get("pos", "")
+    top_gender = parsed.get("gender", "")
+    items = [{
+        "pos": top_pos,
+        "gender": top_gender,
+        "native_phrase": p.get("native_phrase", ""),
+        "correct_translation": p.get("correct_translation", ""),
+        "text_meaning": p.get("text_meaning", ""),
+        "synonyms": p.get("synonyms", ""),
+        "category": p.get("category", ""),
+        "gif_keywords": p.get("gif_keywords", []),
+    } for p in parsed.get("phrases", [])]
+    return {"ipa": parsed.get("ipa", ""), "items": items}
+
+
+def _content_key_phrase_native_writing(word, item):
+    native = item.get("native_phrase", "").strip()
+    return hashlib.md5(native.lower().encode("utf-8")).hexdigest(), native
+
+
+def _phrase_native_writing_extract(item):
+    correct = item.get("correct_translation", "")
+    return {
+        "text_meaning": item.get("text_meaning", ""),
+        "text_example_phrase": correct,                          # SOURCE_LANG answer, WITH ** markers
+        "text_example_translation": item.get("native_phrase", ""),  # TARGET_LANG prompt, shown on Front
+        "tts_example_text": correct.replace("**", "").strip(),     # stripped for TTS
+    }
+
+
+_PHRASE_NATIVE_WRITING_FRONT = """
+<div class="example-translation">{{Text_Example_Translation}}</div>
+"""
+
+_PHRASE_NATIVE_WRITING_BACK = """
+{{FrontSide}}
+<hr>
+<div class="example">{{Text_Example_Phrase}}</div>
+{{Sound_Example}}
+<div class="word">{{Word}}</div>
+{{#IPA}}<div class="ipa">/ {{IPA}} /</div>{{/IPA}}
+{{Gender}}
+<div class="gif-box">{{Image}}</div>
+{{#Text_Meaning}}<div class="meaning">{{Text_Meaning}}</div>{{/Text_Meaning}}
+{{Synonyms}}
+"""
+
+
+# ─────────────────────────────────────────────
+#  phrase_audio_recognition / phrase_audio_typing — phrase-anchored
+#  counterparts to audio_writing/audio_typing. Both reuse phrase_context's
+#  prompt/parse/content_key verbatim (same content, audio-first
+#  presentation). Only phrase_audio_typing needs its own extract_fields:
+#  {{type:Text_Example_Phrase}} diffs against the field's literal value, so
+#  it can't carry phrase_context's **markers** (those are fine for the
+#  other phrase modes, which only ever reveal the field via
+#  highlight_delimited(), never type-check it).
+# ─────────────────────────────────────────────
+
+_PHRASE_AUDIO_RECOGNITION_FRONT = """
+{{Sound_Example}}
+"""
+
+_PHRASE_AUDIO_RECOGNITION_BACK = """
+{{FrontSide}}
+<hr>
+<div class="example">{{Text_Example_Phrase}}</div>
+<div class="word">{{Word}}</div>
+{{#IPA}}<div class="ipa">/ {{IPA}} /</div>{{/IPA}}
+{{Gender}}
+<div class="gif-box">{{Image}}</div>
+{{#Text_Meaning}}<div class="meaning">{{Text_Meaning}}</div>{{/Text_Meaning}}
+{{#Text_Example_Translation}}<div class="example-translation">{{Text_Example_Translation}}</div>{{/Text_Example_Translation}}
+{{Synonyms}}
+"""
+
+
+def _phrase_audio_typing_extract(item):
+    raw = item.get("phrase_raw", "")
+    stripped = raw.replace("**", "").strip()
+    return {
+        "text_meaning": item.get("text_meaning", ""),
+        "text_example_phrase": stripped,       # clean — {{type:}} needs a verbatim match
+        "text_example_translation": item.get("phrase_translation", ""),
+        "tts_example_text": stripped,
+    }
+
+
+_PHRASE_AUDIO_TYPING_FRONT = """
+{{Sound_Example}}
+<br>
+{{type:Text_Example_Phrase}}
+"""
+
+_PHRASE_AUDIO_TYPING_BACK = _PHRASE_AUDIO_RECOGNITION_BACK   # identical reveal — only the Front differs
+
+
+CREATION_MODES = {
+    "word_meaning": {
+        "label":           "Word -> Meaning",
+        "model_id_offset": 0,               # unchanged MODEL_ID; cloze still MODEL_ID+10
+        "build_prompt":    _build_word_meaning_prompt,
+        "parse_response":  _parse_word_meaning_response,
+        "content_key":     _content_key_word_meaning,
+        "extract_fields":  _word_meaning_extract,
+        "uses_card_type":  True,
+        # front/back intentionally absent — build_anki_model()'s word_meaning
+        # branch keeps using template.FRONT/BACK + the existing CARD_TYPE
+        # variants (_REVERSED_*, _TYPE_*, cloze) exactly as today.
+    },
+    "phrase_context": {
+        "label":           "Phrase in Context",
+        "model_id_offset": 20,              # +10 is cloze's existing offset
+        "build_prompt":    _build_phrase_context_prompt,
+        "parse_response":  _parse_phrase_context_response,
+        "content_key":     _content_key_phrase_context,
+        "extract_fields":  _phrase_context_extract,
+        "uses_card_type":  False,
+        "front":           _PHRASE_CONTEXT_FRONT,
+        "back":            _PHRASE_CONTEXT_BACK,
+    },
+    "audio_meaning": {
+        "label":           "Audio -> Meaning",
+        "model_id_offset": 30,
+        "build_prompt":    _build_word_meaning_prompt,     # reused verbatim — same content as word_meaning
+        "parse_response":  _parse_word_meaning_response,
+        "content_key":     _content_key_word_meaning,
+        "extract_fields":  _word_meaning_extract,
+        "uses_card_type":  False,
+        "front":           _AUDIO_MEANING_FRONT,
+        "back":            _AUDIO_MEANING_BACK,
+        "simple_omits":    ("ipa", "gender", "synonyms", "text_example", "text_example_translation"),
+    },
+    "audio_writing": {
+        "label":           "Audio Recognition",
+        "model_id_offset": 40,
+        "build_prompt":    _build_word_meaning_prompt,
+        "parse_response":  _parse_word_meaning_response,
+        "content_key":     _content_key_word_meaning,
+        "extract_fields":  _word_meaning_extract,
+        "uses_card_type":  False,
+        "front":           _AUDIO_WRITING_FRONT,
+        "back":            _AUDIO_WRITING_BACK,
+        "always_omit":     ("text_meaning", "text_example", "text_example_translation"),
+        "simple_omits":    ("ipa", "gender", "synonyms"),
+    },
+    "audio_typing": {
+        "label":           "Audio Recognition Typing",
+        "model_id_offset": 50,
+        "build_prompt":    _build_word_meaning_prompt,
+        "parse_response":  _parse_word_meaning_response,
+        "content_key":     _content_key_word_meaning,
+        "extract_fields":  _word_meaning_extract,
+        "uses_card_type":  False,
+        "front":           _AUDIO_TYPING_FRONT,
+        "back":            _AUDIO_TYPING_BACK,
+        "always_omit":     ("text_meaning", "text_example", "text_example_translation"),
+        "simple_omits":    ("ipa", "gender", "synonyms"),
+    },
+    "phrase_native_writing": {
+        "label":           "Write Response",
+        "model_id_offset": 60,
+        "build_prompt":    _build_phrase_native_writing_prompt,
+        "parse_response":  _parse_phrase_native_writing_response,
+        "content_key":     _content_key_phrase_native_writing,
+        "extract_fields":  _phrase_native_writing_extract,
+        "uses_card_type":  False,
+        "front":           _PHRASE_NATIVE_WRITING_FRONT,
+        "back":            _PHRASE_NATIVE_WRITING_BACK,
+        "simple_omits":    ("ipa", "gender", "synonyms", "text_meaning"),
+    },
+    "phrase_audio_recognition": {
+        "label":           "Phrase Audio Recognition",
+        "model_id_offset": 70,
+        "build_prompt":    _build_phrase_context_prompt,
+        "parse_response":  _parse_phrase_context_response,
+        "content_key":     _content_key_phrase_context,
+        "extract_fields":  _phrase_context_extract,
+        "uses_card_type":  False,
+        "front":           _PHRASE_AUDIO_RECOGNITION_FRONT,
+        "back":            _PHRASE_AUDIO_RECOGNITION_BACK,
+        "simple_omits":    ("ipa", "gender", "synonyms", "text_meaning", "text_example_translation"),
+    },
+    "phrase_audio_typing": {
+        "label":           "Phrase Audio Recognition Typing",
+        "model_id_offset": 80,
+        "build_prompt":    _build_phrase_context_prompt,
+        "parse_response":  _parse_phrase_context_response,
+        "content_key":     _content_key_phrase_context,
+        "extract_fields":  _phrase_audio_typing_extract,
+        "uses_card_type":  False,
+        "front":           _PHRASE_AUDIO_TYPING_FRONT,
+        "back":            _PHRASE_AUDIO_TYPING_BACK,
+        "simple_omits":    ("ipa", "gender", "synonyms", "text_meaning", "text_example_translation"),
+    },
+}
+
+
+def generate_card_content(word, known_categories=None, creation_mode=None):
+    creation_mode = creation_mode or current_creation_mode()
+    mode_def = CREATION_MODES[creation_mode]
+    prompt, max_tokens = mode_def["build_prompt"](word, known_categories or [])
+
     provider = current_ai_provider()
     label    = AI_PROVIDER_LABELS.get(provider, provider)
     call_fn  = AI_PROVIDER_CALLERS.get(provider, _call_groq)
     try:
-        raw = call_fn(prompt)
+        raw = call_fn(prompt, max_tokens=max_tokens)
         if not raw:
             return None
-        return _clean_json_text(raw)
+        parsed = _clean_json_text(raw)
+        return mode_def["parse_response"](parsed)
     except json.JSONDecodeError as e:
         print(f"    [{label}] Invalid JSON for '{word}': {e}")
         return None
@@ -830,6 +1509,19 @@ def highlight_word(sentence, word):
     )
 
 
+def highlight_delimited(text, delimiter="**", css_class="highlight"):
+    """Convert **word**-delimited spans (as returned by the AI for
+    phrase-based creation modes) into <span class="...">...</span>. Used
+    instead of highlight_word()'s substring match because exact matching
+    against the dictionary form fails for inflected/conjugated languages —
+    the AI marks the exact surface form it actually used instead. Reuses
+    the same "highlight" class highlight_word() uses (not a new one), so it
+    picks up the identical `.example .highlight` CSS rule every CARD_TEMPLATE
+    already defines — no template file needs to change for a new mode."""
+    pattern = re.compile(re.escape(delimiter) + r"(.+?)" + re.escape(delimiter))
+    return pattern.sub(lambda m: f'<span class="{css_class}">{m.group(1)}</span>', text)
+
+
 def make_cloze_text(sentence, word):
     """Replace the target word with Anki cloze notation {{c1::word}}."""
     pattern = re.compile(re.escape(word), re.IGNORECASE)
@@ -914,12 +1606,46 @@ _TYPE_BACK = """
 """
 
 
-def build_anki_model(template, card_type=None):
+def build_anki_model(template, card_type=None, creation_mode=None):
     """
     Build a genanki Model.
-    card_type: "basic" | "basic_reversed" | "type_answer" | "cloze"
-    Defaults to config.CARD_TYPE if not specified.
+    card_type: "basic" | "basic_reversed" | "type_answer" | "cloze" — only
+        meaningful when creation_mode == "word_meaning"; every other mode
+        has exactly one fixed note shape (own Model, own MODEL_ID offset),
+        the same way "cloze" already is a fixed alternate shape today.
+    Defaults to config.CARD_TYPE / config.CREATION_MODE if not specified.
     """
+    creation_mode = creation_mode or current_creation_mode()
+
+    if creation_mode != "word_meaning":
+        mode_def = CREATION_MODES[creation_mode]
+        fields = [
+            {"name": "Word"},
+            {"name": "Image"},
+            {"name": "Sound_Word"},
+            {"name": "Sound_Meaning"},
+            {"name": "Sound_Example"},
+            {"name": "Text_Meaning"},
+            {"name": "Text_Example_Phrase"},
+            {"name": "Text_Example_Translation"},
+            {"name": "IPA"},
+            {"name": "Gender"},
+            {"name": "Synonyms"},
+        ]
+        if getattr(template, "REQUIRES_RAW_IMAGE", False):
+            fields.append({"name": "Image_Raw"})
+        return genanki.Model(
+            config.MODEL_ID + mode_def["model_id_offset"],
+            f"{config.DECK_NAME} {mode_def['label']} Model",
+            fields=fields,
+            templates=[{
+                "name": mode_def["label"],
+                "qfmt": mode_def["front"],
+                "afmt": mode_def["back"],
+            }],
+            css=template.CSS,
+        )
+
     if card_type is None:
         card_type = config.CARD_TYPE
 
@@ -997,13 +1723,55 @@ def build_anki_model(template, card_type=None):
 #  .apkg builder
 # ─────────────────────────────────────────────
 
-def build_notes(cards, model, template, card_type=None):
+def build_notes(cards, model, template, card_type=None, creation_mode=None):
     """
     Convert database rows into genanki Note objects.
     Returns (notes, media, ids) where each entry in `notes` is a
     (category, Note) pair — `category` is '' for the root deck, or a
     study-block label the caller routes into a `<Deck>::<Category>` subdeck.
     """
+    creation_mode = creation_mode or current_creation_mode()
+
+    if creation_mode != "word_meaning":
+        notes = []
+        media = []
+        ids   = []
+        needs_raw = getattr(template, "REQUIRES_RAW_IMAGE", False)
+        for row in cards:
+            (word_label, ipa, text_meaning, text_example,
+             text_example_translation, synonyms, aw, am, ae,
+             gif_url, gif_raw_url, gender_str, category, word, card_id) = row
+            category = category.strip() if (category and config.ENABLE_CATEGORIES) else ""
+
+            fields = [
+                word_label,
+                gif_url or "",
+                sound_tag(aw) if config.ENABLE_WORD_AUDIO    else "",
+                sound_tag(am) if config.ENABLE_MEANING_AUDIO else "",
+                sound_tag(ae) if config.ENABLE_EXAMPLE_AUDIO else "",
+                text_meaning,
+                highlight_delimited(text_example),
+                text_example_translation,
+                ipa,
+                gender_badge(gender_str),
+                format_synonyms(synonyms),
+            ]
+            if needs_raw:
+                fields.append(gif_raw_url or "")
+
+            m = re.search(r"\(([^)]+)\)", word_label)
+            tags = [f"vocab::{pos_to_tag(m.group(1) if m else '')}"]
+            if category:
+                tags.append(f"topic::{category_to_tag(category)}")
+
+            notes.append((category, genanki.Note(model=model, fields=fields, tags=tags)))
+            ids.append(card_id)
+            for path in [aw, am, ae]:
+                if path and os.path.exists(path):
+                    media.append(path)
+
+        return notes, list(set(media)), ids
+
     if card_type is None:
         card_type = config.CARD_TYPE
 
@@ -1099,6 +1867,21 @@ def _build_deck_tree(base_id, base_name, categorized_notes):
     return decks, len(decks_by_category)
 
 
+def _export_type_label(card_type, modes_present):
+    """Identical to today's label whenever word_meaning is the only mode
+    present in the DB — the case for every pre-existing user — so backward
+    compatibility is concretely testable, not just assumed."""
+    if modes_present == ["word_meaning"]:
+        return _CARD_TYPE_LABELS.get(card_type, card_type)
+    parts = []
+    for m in modes_present:
+        if m == "word_meaning":
+            parts.append(f"word_meaning:{_CARD_TYPE_LABELS.get(card_type, card_type)}")
+        else:
+            parts.append(CREATION_MODES[m]["label"])
+    return " + ".join(parts)
+
+
 def export_decks(conn, template, card_type=None):
     """
     Export two .apkg files:
@@ -1108,47 +1891,68 @@ def export_decks(conn, template, card_type=None):
     Cards with a category are filed into a "<Deck>::<Category>" subdeck
     (e.g. "French Vocabulary::Phrasal Verbs") in addition to the root deck,
     controlled by config.ENABLE_CATEGORIES.
+
+    Different creation_modes need different genanki Models (a Model fixes
+    one field-set + one Front/Back for every Note built with it — it can't
+    vary per-Note), so this collects cards per distinct creation_mode
+    present in the DB, builds one Model per mode, and merges the resulting
+    notes/media/ids into a single deck tree / .apkg per export.
     """
     if card_type is None:
         card_type = config.CARD_TYPE
 
-    model = build_anki_model(template, card_type)
-    label = _CARD_TYPE_LABELS.get(card_type, card_type)
+    modes_present = [r[0] for r in conn.execute(
+        "SELECT DISTINCT creation_mode FROM cards ORDER BY creation_mode"
+    ).fetchall()] or ["word_meaning"]
+
+    def _collect(new_only):
+        notes, media, ids = [], [], []
+        for mode in modes_present:
+            mode_card_type = card_type if mode == "word_meaning" else None
+            cards = get_all_cards(conn, new_only=new_only, creation_mode=mode)
+            if not cards:
+                continue
+            model = build_anki_model(template, mode_card_type, creation_mode=mode)
+            n, m, i = build_notes(cards, model, template, mode_card_type, creation_mode=mode)
+            notes.extend(n)
+            media.extend(m)
+            ids.extend(i)
+        return notes, list(set(media)), ids
+
+    label = _export_type_label(card_type, modes_present)
 
     # New cards only
-    new_cards = get_all_cards(conn, new_only=True)
-    if new_cards:
-        notes, media, ids = build_notes(new_cards, model, template, card_type)
-        decks, cat_count = _build_deck_tree(config.DECK_ID + 1, f"{config.DECK_NAME} — New", notes)
+    new_notes, new_media, new_ids = _collect(new_only=True)
+    if new_notes:
+        decks, cat_count = _build_deck_tree(config.DECK_ID + 1, f"{config.DECK_NAME} — New", new_notes)
         pkg_new = genanki.Package(decks)
-        pkg_new.media_files = media
+        pkg_new.media_files = new_media
         pkg_new.write_to_file(config.DECK_OUTPUT_NEW)
-        mark_as_exported(conn, ids)
+        mark_as_exported(conn, new_ids)
         conn.execute(
             "INSERT INTO export_log (type, card_count) VALUES (?, ?)",
-            (f"new/{label}", len(new_cards))
+            (f"new/{label}", len(new_notes))
         )
         conn.commit()
         subdeck_note = f"  ({cat_count} category subdeck{'s' if cat_count != 1 else ''})" if cat_count else ""
-        print(f"\n[OK] New cards    : {config.DECK_OUTPUT_NEW}  ({len(new_cards)} cards)  [{label}]{subdeck_note}")
+        print(f"\n[OK] New cards    : {config.DECK_OUTPUT_NEW}  ({len(new_notes)} cards)  [{label}]{subdeck_note}")
         print(f"     -> Import THIS file into Anki to preserve your manual edits.")
     else:
         print(f"\n[INFO] No new cards to export.")
 
     # Full backup
-    all_cards = get_all_cards(conn, new_only=False)
-    notes_full, media_full, _ = build_notes(all_cards, model, template, card_type)
-    decks_full, cat_count_full = _build_deck_tree(config.DECK_ID, config.DECK_NAME, notes_full)
+    full_notes, full_media, _ = _collect(new_only=False)
+    decks_full, cat_count_full = _build_deck_tree(config.DECK_ID, config.DECK_NAME, full_notes)
     pkg_full = genanki.Package(decks_full)
-    pkg_full.media_files = media_full
+    pkg_full.media_files = full_media
     pkg_full.write_to_file(config.DECK_OUTPUT_FULL)
     conn.execute(
         "INSERT INTO export_log (type, card_count) VALUES (?, ?)",
-        (f"full/{label}", len(all_cards))
+        (f"full/{label}", len(full_notes))
     )
     conn.commit()
     subdeck_note_full = f"  ({cat_count_full} category subdeck{'s' if cat_count_full != 1 else ''})" if cat_count_full else ""
-    print(f"    Full backup : {config.DECK_OUTPUT_FULL}  ({len(all_cards)} cards total)  [{label}]{subdeck_note_full}")
+    print(f"    Full backup : {config.DECK_OUTPUT_FULL}  ({len(full_notes)} cards total)  [{label}]{subdeck_note_full}")
 
 
 # ─────────────────────────────────────────────
@@ -1353,9 +2157,60 @@ _GIF_RATINGS = [
     ("r",    "R — least restrictive"),
 ]
 
+_MEANING_EXHAUSTIVENESS_OPTIONS = [
+    ("essential", "Essential only — 1 meaning per word"),
+    ("important", "Most important — up to 5 meanings (default)"),
+    ("all",       "All meanings — up to 12, larger AI token budget"),
+]
+
 _TTS_PROVIDERS = [
     ("gtts",       "gTTS — cloud (Google Translate TTS), one voice per language (default)"),
     ("pocket_tts", "Pocket TTS — local/CPU, multiple realistic voices (Kyutai Labs)"),
+]
+
+# "Card content" — a guided 2-step flow (Word-based / Phrase-based, then
+# "how do you want to be tested?") replaces a single flat CREATION_MODE
+# picker + a separate CARD_TYPE picker. _WORD_TESTING_OPTIONS values that
+# contain ":" combine CREATION_MODE + CARD_TYPE into one choice (see
+# _WordTestingPicker below) since word_meaning's 4 CARD_TYPE variants are,
+# from the user's perspective, just more "how tested" answers for word
+# content, not a separate axis. Only modes with a real CREATION_MODES
+# registry entry are listed — deliberately not exposing
+# selectable-but-unimplemented modes in either TUI.
+_WORD_FAMILY_MODES = {"word_meaning", "audio_meaning", "audio_writing", "audio_typing"}
+_PHRASE_FAMILY_MODES = {"phrase_context", "phrase_native_writing",
+                         "phrase_audio_recognition", "phrase_audio_typing"}
+
+_WORD_TESTING_OPTIONS = [
+    ("word_meaning:basic",          "See the meaning"),
+    ("word_meaning:basic_reversed", "See the meaning, both directions"),
+    ("word_meaning:type_answer",    "See the meaning, type the word"),
+    ("word_meaning:cloze",          "Fill in the blank in a sentence"),
+    ("audio_meaning",               "Hear it, recall the meaning"),
+    ("audio_writing",               "Hear it, recall the spelling"),
+    ("audio_typing",                "Hear it, type what you heard"),
+]
+
+_PHRASE_TESTING_OPTIONS = [
+    ("phrase_context",           "See the meaning in context"),
+    ("phrase_native_writing",    "Write the translation"),
+    ("phrase_audio_recognition", "Hear it, recall the phrase"),
+    ("phrase_audio_typing",      "Hear it, type what you heard"),
+]
+
+_CREATION_MODE_VERBOSITY_OPTIONS = [
+    ("complete", "Complete — every applicable field filled in (default)"),
+    ("simple",   "Simple — only the essential fields"),
+]
+
+_WORD_SOURCE_OPTIONS = [
+    ("frequency_list", "Frequency word list (default)"),
+    ("markdown_notes", "Markdown notes / Obsidian vault"),
+]
+
+_MARKDOWN_EXTRACTION_OPTIONS = [
+    ("highlights", "Only ==highlighted== text (recommended)"),
+    ("all_words",  "Every word, ranked by frequency in your notes"),
 ]
 
 
@@ -1377,6 +2232,12 @@ def _options_snapshot():
         "tts_providers":        _TTS_PROVIDERS,
         "pocket_tts_lang_map":  POCKET_TTS_LANG_MAP,
         "pocket_tts_voices":    POCKET_TTS_VOICES,
+        "meaning_exhaustiveness_options": _MEANING_EXHAUSTIVENESS_OPTIONS,
+        "word_testing_options":   _WORD_TESTING_OPTIONS,
+        "phrase_testing_options": _PHRASE_TESTING_OPTIONS,
+        "creation_mode_verbosity_options": _CREATION_MODE_VERBOSITY_OPTIONS,
+        "word_sources":         _WORD_SOURCE_OPTIONS,
+        "markdown_extraction_modes": _MARKDOWN_EXTRACTION_OPTIONS,
     }
 
 
@@ -1394,7 +2255,8 @@ def write_config(key, value):
     elif isinstance(value, (int, float)):
         val_repr = str(value)
     else:
-        val_repr = f'"{value}"'
+        escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+        val_repr = f'"{escaped}"'
 
     # Group 1: "KEY   = "   Group 2: the rest of the line (value + optional comment)
     pattern = re.compile(
@@ -1524,7 +2386,6 @@ def configure_deck():
         _tui.TextInput('Deck name',          'DECK_NAME',
                        hint='Name shown inside Anki — avoid changing after first import'),
         _tui.Picker('Card template',         'CARD_TEMPLATE',  _TEMPLATES),
-        _tui.Picker('Card type',             'CARD_TYPE',      _CARD_TYPES),
         _tui.TextInput('Output — new deck',  'DECK_OUTPUT_NEW',
                        hint='.apkg file to import into Anki daily'),
         _tui.TextInput('Output — full deck', 'DECK_OUTPUT_FULL',
@@ -1545,6 +2406,80 @@ def configure_generation():
         _tui.NumberInput('Total word pool', 'TOTAL_WORD_POOL',
                          hint='Size of frequency list to draw from',
                          min_val=100, step=100),
+        _tui.Separator(),
+        _tui.Picker('Meaning exhaustiveness', 'MEANING_EXHAUSTIVENESS',
+                    _MEANING_EXHAUSTIVENESS_OPTIONS,
+                    hint='How many distinct meanings (cards) per word'),
+        _tui.Separator(),
+        _tui.Picker('Word source', 'WORD_SOURCE', _WORD_SOURCE_OPTIONS,
+                    hint='Where candidate words come from'),
+        _tui.TextInput('Markdown notes folder', 'MARKDOWN_NOTES_PATH',
+                       hint='Folder scanned recursively for *.md files'),
+        _tui.Picker('Markdown extraction', 'MARKDOWN_EXTRACTION_MODE', _MARKDOWN_EXTRACTION_OPTIONS,
+                    hint='Only used when Word source = Markdown notes'),
+        _tui.Separator(),
+        _tui.Back(),
+    ])
+
+
+class _WordTestingPicker(_tui.Picker):
+    """Combines CREATION_MODE + CARD_TYPE into one choice — the
+    word_meaning-family options need both keys written together."""
+
+    def _idx(self):
+        mode = getattr(config, 'CREATION_MODE', 'word_meaning')
+        val = f"word_meaning:{getattr(config, 'CARD_TYPE', 'basic')}" if mode == 'word_meaning' else mode
+        for i, (v, _) in enumerate(self.options):
+            if v == val:
+                return i
+        return 0
+
+    def _set(self, idx):
+        value = self.options[idx % len(self.options)][0]
+        if ':' in value:
+            mode, card_type = value.split(':', 1)
+            write_config('CREATION_MODE', mode)
+            write_config('CARD_TYPE', card_type)
+        else:
+            write_config('CREATION_MODE', value)
+
+
+def _word_content_hint():
+    mode = current_creation_mode()
+    if mode not in _WORD_FAMILY_MODES:
+        return ''
+    key = f"word_meaning:{config.CARD_TYPE}" if mode == "word_meaning" else mode
+    return dict(_WORD_TESTING_OPTIONS).get(key, mode)
+
+
+def _phrase_content_hint():
+    mode = current_creation_mode()
+    return dict(_PHRASE_TESTING_OPTIONS).get(mode, '') if mode in _PHRASE_FAMILY_MODES else ''
+
+
+def _configure_word_content():
+    _tui.run_menu('Word-Based Cards', [
+        _WordTestingPicker('How do you want to be tested?', 'CREATION_MODE', _WORD_TESTING_OPTIONS),
+        _tui.Separator(),
+        _tui.Back(),
+    ])
+
+
+def _configure_phrase_content():
+    _tui.run_menu('Phrase-Based Cards', [
+        _tui.Picker('How do you want to be tested?', 'CREATION_MODE', _PHRASE_TESTING_OPTIONS),
+        _tui.Separator(),
+        _tui.Back(),
+    ])
+
+
+def configure_card_content():
+    _tui.run_menu('Card Content', [
+        _tui.Action('Word-based cards',   _configure_word_content,   _word_content_hint),
+        _tui.Action('Phrase-based cards', _configure_phrase_content, _phrase_content_hint),
+        _tui.Separator(),
+        _tui.Picker('Field verbosity', 'CREATION_MODE_VERBOSITY', _CREATION_MODE_VERBOSITY_OPTIONS,
+                    hint='Simple/complete fields — audio & production styles only'),
         _tui.Separator(),
         _tui.Back(),
     ])
@@ -1618,9 +2553,12 @@ def configure_main():
                     configure_ai,
                     lambda: (f'{AI_PROVIDER_LABELS.get(current_ai_provider(), current_ai_provider())}'
                              + ('' if not ai_key_missing() else '  ! key missing'))),
+        _tui.Action('Card content',
+                    configure_card_content,
+                    lambda: (_word_content_hint() or _phrase_content_hint())),
         _tui.Action('Deck & cards',
                     configure_deck,
-                    lambda: f'{config.CARD_TEMPLATE}  |  {config.CARD_TYPE}'),
+                    lambda: config.CARD_TEMPLATE),
         _tui.Action('Generation',
                     configure_generation,
                     lambda: f'{config.WORDS_PER_RUN}/run   pool {config.TOTAL_WORD_POOL}'),
@@ -1636,6 +2574,106 @@ def configure_main():
         _tui.Separator(),
         _tui.Back('Back to main menu'),
     ])
+
+
+# ─────────────────────────────────────────────
+#  Word sources — where candidate words come from (see config.WORD_SOURCE)
+# ─────────────────────────────────────────────
+
+_MD_FRONTMATTER_RE = re.compile(r'\A---\n.*?\n---\n', re.DOTALL)
+_MD_CODE_FENCE_RE  = re.compile(r'```.*?```', re.DOTALL)
+_MD_INLINE_CODE_RE = re.compile(r'`[^`\n]*`')
+_MD_EMBED_RE       = re.compile(r'!\[\[([^\]|]+)(?:\|[^\]]*)?\]\]')
+_MD_WIKILINK_RE    = re.compile(r'\[\[([^\]|]+)(?:\|([^\]]*))?\]\]')
+_MD_LINK_RE        = re.compile(r'\[([^\]]*)\]\([^)]*\)')
+_MD_HEADING_RE     = re.compile(r'^#{1,6}\s+', re.MULTILINE)
+_MD_HIGHLIGHT_RE   = re.compile(r'==(.+?)==', re.DOTALL)
+_MD_WORD_RE        = re.compile(r'\b[^\W\d_]{2,}\b', re.UNICODE)
+
+
+def _iter_markdown_files(root):
+    """Yield every *.md file path under root, sorted for deterministic,
+    reproducible pool order across runs."""
+    paths = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            if name.lower().endswith('.md'):
+                paths.append(os.path.join(dirpath, name))
+    return sorted(paths)
+
+
+def _strip_markdown_noise(text):
+    """Lightweight regex cleanup — strips YAML frontmatter, code, and
+    link/embed/heading syntax while keeping their visible display text."""
+    text = _MD_FRONTMATTER_RE.sub('', text)
+    text = _MD_CODE_FENCE_RE.sub(' ', text)
+    text = _MD_INLINE_CODE_RE.sub(' ', text)
+    text = _MD_EMBED_RE.sub(r'\1', text)
+    text = _MD_WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)
+    text = _MD_LINK_RE.sub(r'\1', text)
+    text = _MD_HEADING_RE.sub('', text)
+    return text
+
+
+def _extract_highlights(text):
+    """Return every ==highlighted== span, in file order."""
+    return [m.group(1).strip() for m in _MD_HIGHLIGHT_RE.finditer(text) if m.group(1).strip()]
+
+
+def _extract_all_words(text):
+    """Return every alphabetic word (Unicode-aware, length >= 2), lowercased."""
+    return [w.lower() for w in _MD_WORD_RE.findall(text)]
+
+
+def _build_markdown_word_pool():
+    """Build the candidate word pool from config.MARKDOWN_NOTES_PATH,
+    per config.MARKDOWN_EXTRACTION_MODE. Returns [] (with a [WARN]) instead
+    of raising on a missing/empty path — this is a user-config boundary."""
+    root = getattr(config, 'MARKDOWN_NOTES_PATH', '')
+    if not root or not os.path.isdir(root):
+        print(col(f'  [WARN] MARKDOWN_NOTES_PATH "{root}" is not a valid folder — word pool is empty.', 'yellow'))
+        return []
+
+    mode = getattr(config, 'MARKDOWN_EXTRACTION_MODE', 'highlights')
+    highlights_seen = []
+    highlights_seen_set = set()
+    word_counts = Counter()
+
+    for path in _iter_markdown_files(root):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                raw = f.read()
+        except OSError:
+            continue
+        cleaned = _strip_markdown_noise(raw)
+
+        if mode == 'highlights':
+            for span in _extract_highlights(cleaned):
+                key = span.lower()
+                if key not in highlights_seen_set:
+                    highlights_seen_set.add(key)
+                    highlights_seen.append(span)
+        else:
+            word_counts.update(_extract_all_words(cleaned))
+
+    if mode == 'highlights':
+        pool = highlights_seen
+    else:
+        pool = [w for w, _count in sorted(word_counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+    return pool[:config.TOTAL_WORD_POOL]
+
+
+WORD_SOURCES = {
+    "frequency_list": lambda: top_n_list(config.SOURCE_LANG, config.TOTAL_WORD_POOL),
+    "markdown_notes": _build_markdown_word_pool,
+}
+
+
+def get_word_pool():
+    """Dispatch to the active config.WORD_SOURCE's pool builder."""
+    source = getattr(config, 'WORD_SOURCE', 'frequency_list')
+    return WORD_SOURCES.get(source, WORD_SOURCES['frequency_list'])()
 
 
 # ─────────────────────────────────────────────
@@ -1658,8 +2696,8 @@ def _do_generate(conn):
         print(col('  [WARN] GIPHY_API_KEY not set — GIFs disabled for this run.', 'yellow'))
         config.ENABLE_GIF = False
 
-    all_words = top_n_list(config.SOURCE_LANG, config.TOTAL_WORD_POOL)
-    processed = get_processed_words(conn)
+    all_words = get_word_pool()
+    processed = get_processed_words(conn, current_creation_mode())
     pending   = [w for w in all_words if w not in processed]
 
     print(f'\n  Word pool   : {col(str(len(all_words)), "yellow")}')
@@ -1707,8 +2745,17 @@ def run_export(conn):
 
 def _generate_loop(conn, pending, limit):
     """Core word-processing loop used by both interactive and headless modes."""
-    processed_count = 0
+    processed_count  = 0
+    creation_mode    = current_creation_mode()
+    mode_def         = CREATION_MODES[creation_mode]
     known_categories = get_known_categories(conn) if config.ENABLE_CATEGORIES else []
+
+    # Fields this mode never shows (always_omit) or hides only in "simple"
+    # verbosity (simple_omits) — see CLAUDE.md § Creation modes. Empty for
+    # word_meaning/phrase_context, which never declare either list.
+    omit = set(mode_def.get("always_omit", ()))
+    if getattr(config, "CREATION_MODE_VERBOSITY", "complete") == "simple":
+        omit |= set(mode_def.get("simple_omits", ()))
 
     for word in pending:
         if processed_count >= limit:
@@ -1716,24 +2763,26 @@ def _generate_loop(conn, pending, limit):
 
         print(f'  [{processed_count + 1}/{limit}] {col(word, "bold")}')
 
-        ai_data = generate_card_content(word, known_categories)
+        ai_data = generate_card_content(word, known_categories, creation_mode)
         time.sleep(config.DELAY_AI)
 
         if not ai_data:
-            print(col('    [WARN] AI failed — skipping', 'yellow'))
-            save_card(conn, {
-                "word": word, "word_label": word,
-                "meaning_id": 0,
-                "text_example_phrase": f"[no sentence] {word}",
-            })
+            # Deliberately not saved to the DB: get_processed_words() keys
+            # off any row existing for this (word, creation_mode) pair, so
+            # a stub row here would permanently exclude the word from every
+            # future run's pending list for this mode — turning a transient
+            # failure (rate limit, timeout, bad JSON) into a silently lost
+            # word forever. Leaving it unsaved means it's just picked up
+            # again on the next run.
+            print(col('    [WARN] AI failed — skipping (will retry next run)', 'yellow'))
             processed_count += 1
             continue
 
-        ipa      = ai_data.get("ipa", "")
-        meanings = ai_data.get("meanings", [])
+        ipa   = "" if "ipa" in omit else ai_data.get("ipa", "")
+        items = ai_data.get("items", [])
 
-        if not meanings:
-            print(col('    [WARN] No meanings returned — skipping', 'yellow'))
+        if not items:
+            print(col('    [WARN] No content returned — skipping', 'yellow'))
             processed_count += 1
             continue
 
@@ -1746,36 +2795,39 @@ def _generate_loop(conn, pending, limit):
             except Exception as e:
                 print(col(f'    [WARN] Word audio error: {e}', 'yellow'))
 
-        for meaning_id, meaning in enumerate(meanings):
-            if card_exists(conn, word, meaning_id):
-                print(col(f'    [SKIP] Meaning {meaning_id} already in DB', 'dim'))
+        for meaning_id, item in enumerate(items):
+            content_key, source_phrase = mode_def["content_key"](word, item)
+            if card_exists(conn, creation_mode, content_key, meaning_id):
+                print(col(f'    [SKIP] Item {meaning_id} already in DB', 'dim'))
                 continue
 
-            pos                      = meaning.get("pos", "")
-            gender                   = meaning.get("gender", "")
-            text_meaning             = meaning.get("text_meaning", "")
-            text_example             = meaning.get("text_example_phrase", "")
-            text_example_translation = meaning.get("text_example_translation", "")
-            synonyms                 = meaning.get("synonyms", "")
-            gif_keywords             = meaning.get("gif_keywords", [])
-            category                 = (meaning.get("category") or "").strip() if config.ENABLE_CATEGORIES else ""
+            fields = mode_def["extract_fields"](item)
+            pos                      = item.get("pos", "")
+            gender                   = "" if "gender" in omit else item.get("gender", "")
+            text_meaning             = "" if "text_meaning" in omit else fields["text_meaning"]
+            text_example             = "" if "text_example" in omit else fields["text_example_phrase"]
+            text_example_translation = "" if "text_example_translation" in omit else fields["text_example_translation"]
+            tts_example_text         = "" if "text_example" in omit else fields["tts_example_text"]
+            synonyms                 = "" if "synonyms" in omit else item.get("synonyms", "")
+            gif_keywords             = item.get("gif_keywords", [])
+            category                 = (item.get("category") or "").strip() if config.ENABLE_CATEGORIES else ""
             if category and category not in known_categories:
                 known_categories.append(category)
 
-            word_label = f"{word} ({pos})" if len(meanings) > 1 and pos else word
+            word_label = f"{word} ({pos})" if len(items) > 1 and pos else word
 
             audio_example_path = ""
-            if config.ENABLE_AUDIO and config.ENABLE_EXAMPLE_AUDIO:
+            if config.ENABLE_AUDIO and config.ENABLE_EXAMPLE_AUDIO and tts_example_text:
                 try:
                     audio_example_path, _ = generate_audio(
-                        text_example, lang=config.TTS_SOURCE_LANG, voice_field="source"
+                        tts_example_text, lang=config.TTS_SOURCE_LANG, voice_field="source"
                     )
-                    print(col(f'    [AUDIO] Example — meaning {meaning_id}', 'dim'))
+                    print(col(f'    [AUDIO] Example — item {meaning_id}', 'dim'))
                 except Exception as e:
                     print(col(f'    [WARN] Example audio error: {e}', 'yellow'))
 
             audio_meaning_path = ""
-            if config.ENABLE_AUDIO and config.ENABLE_MEANING_AUDIO:
+            if config.ENABLE_AUDIO and config.ENABLE_MEANING_AUDIO and text_meaning:
                 try:
                     audio_meaning_path, _ = generate_audio(
                         text_meaning, lang=config.TTS_TARGET_LANG, voice_field="target"
@@ -1812,6 +2864,9 @@ def _generate_loop(conn, pending, limit):
                 "gif_url":                   gif_html,
                 "gif_raw_url":               gif_raw_url,
                 "category":                  category,
+                "creation_mode":             creation_mode,
+                "content_key":               content_key,
+                "source_phrase":             source_phrase,
             })
             cat_suffix = col(f'  [{category}]', 'cyan') if category else ''
             print(col(f'    [DONE] [{word_label}] {text_meaning[:60]}...', 'green') + cat_suffix)
@@ -1926,8 +2981,8 @@ def _run_headless():
         config.ENABLE_GIF = False
 
     conn      = init_db()
-    all_words = top_n_list(config.SOURCE_LANG, config.TOTAL_WORD_POOL)
-    processed = get_processed_words(conn)
+    all_words = get_word_pool()
+    processed = get_processed_words(conn, current_creation_mode())
     pending   = [w for w in all_words if w not in processed]
 
     print(f"\n  Word pool   : {len(all_words)}")

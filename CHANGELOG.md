@@ -13,6 +13,43 @@ shown in the README badge and in both interactive menus.
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-07-26
+### Added
+- `MEANING_EXHAUSTIVENESS` setting — choose how many distinct meanings the
+  AI generates per word ("essential", "important", or "all") instead of a
+  fixed cap.
+- `CREATION_MODE`: a third independent axis (alongside card type and card
+  template) controlling what the AI generates and what becomes a card's
+  front vs. back, via a `CREATION_MODES` registry. 8 modes total: Word →
+  Meaning, Phrase in Context, Audio → Meaning, Audio Recognition, Audio
+  Recognition Typing, Write Response, Phrase Audio Recognition, and Phrase
+  Audio Recognition Typing.
+- `CREATION_MODE_VERBOSITY` ("complete"/"simple") — trims a card down to
+  its essential field(s) for the audio/production modes, also skipping TTS
+  generation for any field that would never be shown.
+- `WORD_SOURCE`: generate cards from the user's own markdown notes (e.g. an
+  Obsidian vault) instead of only a frequency word list, extracting either
+  `==highlighted==` spans or every word ranked by occurrence.
+- A guided "Card content" configuration flow in both interactive menus
+  ("What's the card about — word or phrase?" then "How do you want to be
+  tested?"), replacing a single flat mode picker plus a separately-located
+  card type picker.
+### Fixed
+- The curses menu's title banner no longer misaligns with long AI model
+  names (e.g. `gemini-3.5-flash-lite`) — box width is now computed from
+  content length instead of hardcoded.
+- Gemini generation reliability: failed generations are no longer saved as
+  incomplete stub cards, and requests now adaptively pace themselves to the
+  provider's actual per-minute rate limit.
+- `get_all_cards()` no longer silently excludes every card from a mode that
+  doesn't populate an example sentence by design (Audio Recognition /
+  Audio Recognition Typing) from every export.
+- `write_config()` now escapes embedded quotes/backslashes in string
+  values before writing them into config.py.
+### Changed
+- Removed the standalone "Versioning" README section (redundant with the
+  version badge and this changelog).
+
 ## [2.4.1] - 2026-07-24
 ### Fixed
 - `Text_Meaning` no longer embeds the raw source-language word inside the
