@@ -191,36 +191,35 @@ Controls *what* the AI is asked to generate and what becomes the card's front
 (stimulus) vs. back (answer) — a third axis independent of card type
 (mechanics, above) and card template (visuals, below). Stored as
 `CREATION_MODE` (+ `CARD_TYPE` for the Word-based family) in config.py, but
-both interactive menus present it as a guided 2-step choice under
-**Configure → Card content** rather than one long flat list:
+both interactive menus present it as one screen under
+**Configure → Card content** with 4 pickers instead of a flat list of named
+styles — pick **Content**, **Front**, **Back**, and **Card type** directly,
+and each picker's choices narrow to whatever combination makes sense given
+the ones before it:
 
-1. **What's the card about? Word or Phrase.**
-2. **How do you want to be tested?** — a list filtered to whichever content
-   unit you picked.
-
-| Content | Testing style | Front | Back |
+| Content | Front | Back | Card type |
 |---|---|---|---|
-| Word | See the meaning | The word | Its meaning, example sentence, audio, etc. |
-| Word | See the meaning, both directions | The word **and** its meaning (2 cards per note) | Whichever side wasn't shown |
-| Word | See the meaning, type the word | Its meaning + a box to type the word | Anki auto-checks your spelling |
-| Word | Fill in the blank in a sentence | The example sentence with the word blanked out | The full sentence + meaning |
-| Word | Hear it, recall the meaning | The word's audio only | Its meaning, example sentence, audio, etc. |
-| Word | Hear it, recall the spelling | The word's audio only | Its written form/spelling (+ IPA, gender, synonyms) |
-| Word | Hear it, type what you heard | The word's audio + a box to type into | Anki auto-checks your answer against the word's spelling |
-| Phrase | See the meaning in context | A natural example phrase with the word highlighted, plus its audio | The word's dictionary form, meaning in context, and the phrase's translation |
-| Phrase | Write the translation | A phrase in your native language | Its correct written translation into the language you're learning, plus audio |
-| Phrase | Hear it, recall the phrase | The phrase's audio only | The phrase text, in context |
-| Phrase | Hear it, type what you heard | The phrase's audio + a box to type into | Anki auto-checks your answer against the phrase |
+| Word | The word (text) | Meaning | Basic / Basic + Reversed / Type in Answer / Cloze |
+| Word | The word's audio | Meaning | Basic |
+| Word | The word's audio | Word (spelling) | Basic / Type in Answer |
+| Phrase | A natural phrase, word highlighted (text) | Meaning + translation | Basic |
+| Phrase | The same phrase, audio only | Meaning + translation | Basic |
+| Phrase | The same phrase, audio only | Phrase (spelling) | Type in Answer |
+| Phrase | A phrase in your native language | Translation | Type in Answer |
 
-The first 4 "Word" testing styles are `CARD_TYPE`'s basic/basic_reversed/
-type_answer/cloze variants — they only apply to the Word content unit; every
-other testing style has its own single, fixed card shape. Every mode still
-centers on one anchor word, so part-of-speech tags and category subdecks
-keep working the same way no matter which mode generated the card.
+"Type in Answer" adds a typed input box to the Front that Anki auto-checks
+against the Back field letter-for-letter; "Basic" is a flip-and-self-grade
+card; "Basic + Reversed" builds two cards per note (Front→Back and
+Back→Front); "Cloze" blanks the anchor word out of the example sentence
+(Word content only — every Phrase combination has a single fixed Card type,
+since basic_reversed/cloze aren't built for phrase content). Every mode
+still centers on one anchor word, so part-of-speech tags and category
+subdecks keep working the same way no matter which combination generated
+the card.
 
-Every style except the first 4 ("See the meaning"/"...both directions"/
-"...type the word"/"Fill in the blank") also respects `CREATION_MODE_VERBOSITY`
-(Configure → Card content):
+Every combination except the first row (Word/text/Meaning, i.e. `CARD_TYPE`'s
+basic/basic_reversed/type_answer/cloze variants) also respects
+`CREATION_MODE_VERBOSITY` (Configure → Card content):
 
 - **Complete** (default) — every applicable field is filled in (IPA,
   gender, synonyms, and — where relevant — the full example/translation)
@@ -486,18 +485,9 @@ GIPHY_API_KEY     = "your_giphy_api_key_here"
 
 ## Roadmap
 
-Future goals for this project. Completed items are struck through.
+Future goals for this project.
 
-- [x] ~~Add multiple card creation modes beyond the current word-to-meaning + audio mode~~ — the `CREATION_MODE` framework shipped, with **Word → Meaning** (default) and **Phrase in Context** live; every mode centers on one highlighted anchor word so POS/category tagging keeps working unchanged — see [Creation modes](#creation-modes)
-- [x] ~~Add the remaining planned creation modes: `audio_meaning`, Audio recognition, Audio recognition typing, and Write response, each with a simple and a complete field-verbosity version~~ — all 4 shipped, see [Creation modes](#creation-modes)
-- [x] ~~Add phrase-level audio drills (listen to a phrase / type a phrase you heard, matching the word-level ones) and simplify how card content is configured~~ — **Phrase Audio Recognition** and **Phrase Audio Recognition Typing** shipped, and Configure → Card content now guides you through "Word or phrase?" then "how tested?" instead of one long flat list — see [Creation modes](#creation-modes)
-- [x] ~~Let the user choose how exhaustively meanings are generated per word — all possible meanings, only the most important ones, or just the essential one(s) — instead of the current fixed cap~~ — see `MEANING_EXHAUSTIVENESS` in [Configuration reference](#configuration-reference)
-- [x] ~~Add multiple realistic AI-generated voices, produced **locally** (no cloud TTS dependency)~~ — see [Local TTS (Pocket TTS)](#local-tts-pocket-tts)
 - [ ] Add [AnkiConnect](https://ankiweb.net/shared/info/2055492159) support to export/import cards directly into a running Anki instance, without producing a `.apkg` file first — offered **alongside** the existing `.apkg` export, not replacing it
-- [x] ~~Add a beautiful interactive menu (TUI) built with JavaScript~~ — see [JavaScript TUI](#javascript-tui)
-- [x] ~~Include more templates for cards~~ — 4 available: dark, light, minimal, immersive
-- [x] ~~Categorize cards into language-specific subfolders/subdecks (e.g. "Phrasal Verbs", "Verb Conjugation" for English) and track the category in Anki tags~~ — see [Categories & subdecks](#categories--subdecks)
-- [x] ~~Generate flashcards from the user's own markdown notes (e.g. an Obsidian vault) instead of only a frequency word list~~ — the `WORD_SOURCE` axis shipped, with **Frequency word list** (default) and **Markdown notes / Obsidian vault** (highlights or all-words extraction) — see [Word sources](#word-sources)
 - [ ] Pass the *actual sentence* a markdown-sourced word was found in through to the AI prompt as authentic context, instead of discarding it once the word pool is built — would let **Phrase in Context** reuse the user's real example sentence instead of an AI-invented one
 
 ---

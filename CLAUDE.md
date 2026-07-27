@@ -331,14 +331,21 @@ besides `phrase_context` with its own prompt (`PROMPT_TEMPLATE_PHRASE_
 NATIVE_WRITING`) — same rules-section structure, but reversed direction:
 asks for phrases **in `TARGET_LANG`** (the user's native language) plus the
 correct `SOURCE_LANG` translation (word's exact inflected form wrapped in
-`**markers**`, same convention `phrase_context` uses, reusing
-`highlight_delimited()` unchanged). `_phrase_native_writing_extract()` maps
-`correct_translation` → `text_example_phrase` (Back, highlighted) and
-`native_phrase` → `text_example_translation` (Front) — reusing that field
-slot for the native-language prompt is what lets `build_notes()`'s already-
-generic non-`word_meaning` branch handle this mode with zero code changes.
-`content_key` hashes the native phrase (the front-facing text), mirroring
-`_content_key_phrase_context` hashing what *its* front shows.
+`**markers**` in the AI's raw response, same convention `phrase_context`
+uses). `_phrase_native_writing_extract()` maps `correct_translation` →
+`text_example_phrase` (Back) and `native_phrase` → `text_example_translation`
+(Front) — reusing that field slot for the native-language prompt is what
+lets `build_notes()`'s already-generic non-`word_meaning` branch handle this
+mode with zero code changes. Unlike `phrase_context`, the `**` markers are
+stripped at extract time (not kept for `highlight_delimited()`): the Front
+template is `{{Text_Example_Translation}}` + `{{type:Text_Example_Phrase}}`
+— Anki's typed-answer directive, diffing against the field's *literal*
+value — so `text_example_phrase` can't carry markers, same trade-off
+`phrase_audio_typing` already accepts for the same reason (this mode was a
+passive flip-and-self-grade card before; user feedback was that "Write
+Response" should actually check what you type, matching `type_answer`'s
+mechanic). `content_key` hashes the native phrase (the front-facing text),
+mirroring `_content_key_phrase_context` hashing what *its* front shows.
 
 **`phrase_audio_recognition` / `phrase_audio_typing`** (audio-first,
 phrase-anchored modes — the phrase-level counterparts to the 3 audio modes
@@ -390,47 +397,60 @@ that audio never requests it from the TTS provider either.
 ### Guided TUI flow — "Card content"
 
 Both TUIs present `CREATION_MODE`/`CARD_TYPE`/`CREATION_MODE_VERBOSITY` as
-one guided flow (**Configure → Card content**) instead of three separate
-pickers on unrelated screens — a deliberate presentation-layer redesign
-(no config.py schema change; `CREATION_MODE`/`CARD_TYPE` are still the two
-stored settings). Step 1 picks a content-unit family
-(`_WORD_FAMILY_MODES`/`_PHRASE_FAMILY_MODES`, main.py — word_meaning/
-audio_meaning/audio_writing/audio_typing vs. phrase_context/
-phrase_native_writing/phrase_audio_recognition/phrase_audio_typing); Step 2
-shows a testing-style list filtered to that family
-(`_WORD_TESTING_OPTIONS`/`_PHRASE_TESTING_OPTIONS`). Neither `run_menu()`
-(curses) nor `runScreen()` (JS) supports rebuilding one screen's item list
-live off another item's value — both TUIs implement Step 1 → Step 2 as two
-nested screens instead (curses: `configure_card_content()` → `Action` →
-`_configure_word_content()`/`_configure_phrase_content()`; JS:
-`cardContentMenu()` → `wordContentMenu()`/`phraseContentMenu()` — same
-nested-screen idiom `_provider_settings()`/`providerSettings()` already
-established for AI-provider-dependent fields).
+one screen (**Configure → Card content**) with 4 cascading pickers —
+**Content** (Word/Phrase), **Front**, **Back**, **Card type** — instead of
+picking from a list of pre-named testing styles. No config.py schema
+change: `CREATION_MODE`/`CARD_TYPE` are still the only two stored settings;
+the 4 pickers are a lookup table over them. (An earlier version of this
+screen was a 2-step Word-based/Phrase-based → named-style flow; user
+feedback was that it hid what was actually on the Front/Back of the card
+behind opaque labels like "Write the translation.")
 
-The Word family's first 4 testing styles are `CARD_TYPE` variants
-(basic/basic_reversed/type_answer/cloze), which need **both**
-`CREATION_MODE="word_meaning"` and `CARD_TYPE=<variant>` written from one
-selection — a picker writing two config keys at once isn't natively
-supported by either `Picker`/`pickerItem()`, so this is a one-off
-extension: curses subclasses `Picker` (`_WordTestingPicker`, main.py),
-overriding `_idx()`/`_set()` to read/write both keys (same idiom
-`_GroqModelPicker` already uses for a different purpose); JS hand-builds a
-picker-shaped item object (`wordTestingItem()`, screens.mjs) bypassing the
-`pickerItem()` factory, since `runScreen.mjs` only requires
-`{kind, label, options, getValue, setValue}` — nothing enforces going
-through the factory.
+Every one of the 11 shipped `(CREATION_MODE, CARD_TYPE)` combinations is a
+"leaf" in `_CARD_CONTENT_LEAVES` (main.py) — a flat list of dicts keyed by
+the 4 axes (`content`/`front`/`back`/`card_type`) plus which
+`creation_mode`/`stored_card_type` that combination writes.
+`_CARD_CONTENT_LABELS` holds the display label per axis value (reusing
+`_CARD_TYPE_LABELS` verbatim for the `card_type` axis). Every value token
+is globally unique across axes (`word_spelling` vs `phrase_spelling`, not a
+shared `spelling`) so a token always displays the same label regardless of
+which axis's filtered option list it appears in — this matters for the JS
+side's row-render cache (`render.mjs`'s `rowCache`, keyed by label+value,
+not by which options list produced it).
+
+**Cascading mechanism**: `_tui.Picker` (`tui.py`) already re-reads live
+`config` state on every render call via `_idx()`/`_display()` —
+`_run_inner()`'s loop calls `render()` fresh every keypress — so a `Picker`
+subclass whose `options` is a *property* computed from the current leaf
+(`_CardContentPicker`, main.py) becomes reactive to the other 3 pickers'
+values with no new widget infrastructure: changing Content re-derives
+Front's option list on its very next render, changing Front re-derives
+Back's, etc. `_card_content_resolve(axis, value)` is the "cascade reset"
+logic — given a new value for one axis, every axis after it in `_AXES`
+order falls back to the first option still valid for the new prefix. JS
+needed one small extension to get the same behavior: `render.mjs`'s
+`computeRow` and `runScreen.mjs`'s `cyclePicker` used to read `item.options`
+as a plain array; both now go through `resolveOptions(item)`
+(`render.mjs`), which calls `item.options()` when it's a function —
+`cardContentItem()` (screens.mjs) passes exactly such a function, an
+independent JS implementation of the same leaf-table filter/resolve logic
+(`_options_snapshot()` exposes `_CARD_CONTENT_LEAVES`/`_CARD_CONTENT_LABELS`
+as `"card_content_leaves"`/`"card_content_labels"` so JS doesn't hardcode a
+second copy of the *data*, but the filter/cascade *logic* is duplicated —
+same precedent `_CARD_TYPE_LABELS` already sets, since there's no shared
+runtime between Python and JS to factor it into).
 
 **Adding a new mode**: add one `CREATION_MODES` entry (its prompt/parse/
 content-key/extract-fields functions — reuse `word_meaning`'s or
 `phrase_context`'s if the mode wants identical content, same as most modes
 above — plus Front/Back if it's phrase- or audio-based, optionally
-`always_omit`/`simple_omits` for verbosity support) and one tuple to
-`_WORD_TESTING_OPTIONS` or `_PHRASE_TESTING_OPTIONS` (main.py, feeds both
-TUIs via `_options_snapshot()`) plus the matching membership set
-(`_WORD_FAMILY_MODES`/`_PHRASE_FAMILY_MODES`) so hints resolve correctly —
-mirror the same addition in `cli/src/screens.mjs`'s `WORD_FAMILY_MODES`/
-`PHRASE_FAMILY_MODES`/`word_testing_options`/`phrase_testing_options`. No
-schema, migration, or dispatch changes are needed —
+`always_omit`/`simple_omits` for verbosity support) and one entry to
+`_CARD_CONTENT_LEAVES` (main.py, feeds both TUIs via `_options_snapshot()`)
+— reusing existing axis values where they fit (e.g. a new word-audio mode
+reuses `"word_audio"`/`front`) or adding new ones to `_CARD_CONTENT_LABELS`
+if it introduces a genuinely new Front/Back concept. No JS-side data change
+needed — `cardContentMenu()` reads the leaf table generically off the
+bridge. No schema, migration, or dispatch changes are needed —
 `build_anki_model()`/`build_notes()`'s non-`word_meaning` branches are
 already fully generic over `mode_def["front"]`/`["back"]`/
 `["model_id_offset"]`/`["label"]` and the shared 11-field model.

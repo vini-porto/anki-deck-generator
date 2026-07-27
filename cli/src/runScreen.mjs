@@ -4,7 +4,7 @@
 // place. Owns an inline text-edit sub-mode for Text/Number rows.
 
 import { nextKeyBatch, isExitCombo, clearScreen } from './term.mjs';
-import { buildHeader, buildFooter, buildRow, buildEditBox, frame } from './render.mjs';
+import { buildHeader, buildFooter, buildRow, buildEditBox, frame, resolveOptions } from './render.mjs';
 import { styles } from './theme.mjs';
 
 function firstSelectable(items) {
@@ -45,10 +45,11 @@ export async function runScreen({ title, breadcrumb = [], summary = '', items })
   }
 
   async function cyclePicker(item, direction) {
-    const idx = item.options.findIndex(([v]) => v === item.getValue());
-    const n = item.options.length;
+    const options = resolveOptions(item);
+    const idx = options.findIndex(([v]) => v === item.getValue());
+    const n = options.length;
     const next = (((idx + direction) % n) + n) % n;
-    await item.setValue(item.options[next][0]);
+    await item.setValue(options[next][0]);
   }
 
   async function nudgeNumber(item, direction) {
