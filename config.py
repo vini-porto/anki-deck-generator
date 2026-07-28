@@ -110,6 +110,10 @@ MEANING_EXHAUSTIVENESS = "important"   # "essential" | "important" | "all"
 #    "markdown_notes"  — scan MARKDOWN_NOTES_PATH for *.md files (e.g. an
 #                        Obsidian vault) and build the pool from those
 #                        instead. TOTAL_WORD_POOL still caps the result.
+#  MARKDOWN_SOURCE_MODE (only used when WORD_SOURCE = "markdown_notes"):
+#    "folder" — recursively scan MARKDOWN_NOTES_PATH for every *.md file
+#               underneath it (default)
+#    "file"   — treat MARKDOWN_NOTES_PATH as a single .md file
 #  MARKDOWN_EXTRACTION_MODE (only used when WORD_SOURCE = "markdown_notes"):
 #    "highlights" — only text wrapped in ==highlight== syntax (recommended:
 #                    high-signal, avoids common function words dominating)
@@ -119,7 +123,8 @@ MEANING_EXHAUSTIVENESS = "important"   # "essential" | "important" | "all"
 # ─────────────────────────────────────────────────────────────
 
 WORD_SOURCE               = "frequency_list"  # "frequency_list" | "markdown_notes"
-MARKDOWN_NOTES_PATH        = ""                # folder scanned recursively for *.md files
+MARKDOWN_NOTES_PATH        = ""                # folder or single .md file (see MARKDOWN_SOURCE_MODE)
+MARKDOWN_SOURCE_MODE       = "folder"         # "folder" | "file"
 MARKDOWN_EXTRACTION_MODE   = "highlights"     # "highlights" | "all_words"
 
 
