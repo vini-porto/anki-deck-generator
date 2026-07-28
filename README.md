@@ -239,7 +239,14 @@ menu.
 | Source | Behavior |
 |---|---|
 | **Frequency word list** (default) | Top `TOTAL_WORD_POOL` most-frequent words for `SOURCE_LANG`, via `wordfreq` |
-| **Markdown notes / Obsidian vault** | Scans `MARKDOWN_NOTES_PATH` recursively for `*.md` files and builds the pool from those instead — useful if you already keep reading/vocabulary notes in Obsidian or a similar app and want cards built from words you've actually encountered, not a generic corpus |
+| **Markdown notes / Obsidian vault** | Reads `MARKDOWN_NOTES_PATH` and builds the pool from it instead — useful if you already keep reading/vocabulary notes in Obsidian or a similar app and want cards built from words you've actually encountered, not a generic corpus |
+
+`MARKDOWN_SOURCE_MODE` controls whether `MARKDOWN_NOTES_PATH` is a folder
+or a single file:
+
+- **Folder** (default) — recursively scans the folder for every `*.md`
+  file underneath it.
+- **File** — treats `MARKDOWN_NOTES_PATH` as one single `.md` file.
 
 When using markdown notes, `MARKDOWN_EXTRACTION_MODE` controls how words are
 pulled out of your notes:
@@ -422,7 +429,8 @@ TOTAL_WORD_POOL = 2000         # total pool size (either word source)
 MEANING_EXHAUSTIVENESS = "important"  # essential | important | all — meanings (cards) per word
 
 WORD_SOURCE             = "frequency_list"  # frequency_list | markdown_notes — see Word sources
-MARKDOWN_NOTES_PATH     = ""                # folder scanned recursively for *.md files
+MARKDOWN_NOTES_PATH     = ""                # folder or single .md file, per MARKDOWN_SOURCE_MODE
+MARKDOWN_SOURCE_MODE    = "folder"          # folder | file
 MARKDOWN_EXTRACTION_MODE = "highlights"     # highlights | all_words
 
 CARD_TEMPLATE = "dark"         # dark | light | minimal | immersive
@@ -489,6 +497,7 @@ Future goals for this project.
 
 - [ ] Add [AnkiConnect](https://ankiweb.net/shared/info/2055492159) support to export/import cards directly into a running Anki instance, without producing a `.apkg` file first — offered **alongside** the existing `.apkg` export, not replacing it
 - [ ] Pass the *actual sentence* a markdown-sourced word was found in through to the AI prompt as authentic context, instead of discarding it once the word pool is built — would let **Phrase in Context** reuse the user's real example sentence instead of an AI-invented one
+- [ ] Support additional file types beyond Markdown as a word source (`.txt`, `.pdf`, `.docx`, etc.), not just `.md`
 
 ---
 

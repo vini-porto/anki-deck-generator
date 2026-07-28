@@ -472,13 +472,21 @@ source produced `pending` — it only ever consumes a plain `list[str]`.
 `CREATION_MODES`), each entry a zero-arg callable returning `list[str]`:
 - `"frequency_list"` (default) — `top_n_list(config.SOURCE_LANG,
   config.TOTAL_WORD_POOL)`, i.e. exactly today's pre-feature behavior.
-- `"markdown_notes"` — `_build_markdown_word_pool()`: recursively walks
-  `config.MARKDOWN_NOTES_PATH` for `*.md` files (`_iter_markdown_files`,
-  sorted by path for deterministic pool order), strips markdown noise
+- `"markdown_notes"` — `_build_markdown_word_pool()`: reads from
+  `config.MARKDOWN_NOTES_PATH`, per `config.MARKDOWN_SOURCE_MODE`:
+  - `"folder"` (default) — recursively walks `MARKDOWN_NOTES_PATH` for
+    `*.md` files (`_iter_markdown_files`, sorted by path for deterministic
+    pool order).
+  - `"file"` — treats `MARKDOWN_NOTES_PATH` as a single `.md` file; the
+    path must exist and end in `.md` or the same `[WARN]`-and-empty-pool
+    fallback below applies. `_iter_markdown_files()` is not called in this
+    mode — `_build_markdown_word_pool()` builds a one-element path list
+    directly.
+  Every resolved file is then stripped of markdown noise
   (`_strip_markdown_noise` — YAML frontmatter, code fences/spans,
   wikilinks/embeds/links, headings, via regex; no markdown-parser
   dependency, since Obsidian's syntax surface is small and predictable
-  enough not to warrant one), then extracts per
+  enough not to warrant one), then extracted per
   `config.MARKDOWN_EXTRACTION_MODE`:
   - `"highlights"` (recommended default) — `_extract_highlights()` pulls
     `==highlighted==` spans, first-seen order, exact-duplicate-collapsed.
@@ -490,9 +498,10 @@ source produced `pending` — it only ever consumes a plain `list[str]`.
     personal-notes corpus (unlike `wordfreq`'s curated corpus) — this is
     why `highlights` is the recommended default, not `all_words`.
   Either mode is capped at `config.TOTAL_WORD_POOL`, same sizing knob the
-  frequency-list source uses. An empty/invalid `MARKDOWN_NOTES_PATH` prints
-  a `[WARN]` and returns `[]` rather than raising — a user-config boundary,
-  handled the same way other config-driven paths in this codebase are.
+  frequency-list source uses. An empty/invalid `MARKDOWN_NOTES_PATH` (for
+  the active `MARKDOWN_SOURCE_MODE`) prints a `[WARN]` and returns `[]`
+  rather than raising — a user-config boundary, handled the same way other
+  config-driven paths in this codebase are.
 
 No new third-party dependency was needed (pure `os`/`re`/`collections`), so
 unlike the `anthropic`/`pocket_tts` lazy-optional-import pattern (see
@@ -723,7 +732,8 @@ CREATION_MODE_VERBOSITY         # "complete" | "simple" — audio/production tes
                                  # (CREATION_MODE/CARD_TYPE/CREATION_MODE_VERBOSITY are best set via
                                  # Configure -> Card content's guided flow, not hand-edited together)
 WORD_SOURCE                     # "frequency_list" | "markdown_notes" (see § Word sources)
-MARKDOWN_NOTES_PATH             # folder scanned recursively for *.md files
+MARKDOWN_NOTES_PATH             # folder or single .md file, per MARKDOWN_SOURCE_MODE
+MARKDOWN_SOURCE_MODE            # "folder" | "file"
 MARKDOWN_EXTRACTION_MODE        # "highlights" | "all_words"
 ENABLE_CATEGORIES               # category subdecks + topic:: tags (see Category / subdeck organization)
 ENABLE_AUDIO / ENABLE_GIF       # toggle features on/off

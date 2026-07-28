@@ -2277,6 +2277,11 @@ _MARKDOWN_EXTRACTION_OPTIONS = [
     ("all_words",  "Every word, ranked by frequency in your notes"),
 ]
 
+_MARKDOWN_SOURCE_MODE_OPTIONS = [
+    ("folder", "Folder — scan recursively for *.md files (default)"),
+    ("file",   "Single .md file"),
+]
+
 
 def _options_snapshot():
     """Static picker option lists, as JSON, for alternative frontends
@@ -2302,6 +2307,7 @@ def _options_snapshot():
         "creation_mode_verbosity_options": _CREATION_MODE_VERBOSITY_OPTIONS,
         "word_sources":         _WORD_SOURCE_OPTIONS,
         "markdown_extraction_modes": _MARKDOWN_EXTRACTION_OPTIONS,
+        "markdown_source_modes": _MARKDOWN_SOURCE_MODE_OPTIONS,
     }
 
 
@@ -2477,8 +2483,10 @@ def configure_generation():
         _tui.Separator(),
         _tui.Picker('Word source', 'WORD_SOURCE', _WORD_SOURCE_OPTIONS,
                     hint='Where candidate words come from'),
-        _tui.TextInput('Markdown notes folder', 'MARKDOWN_NOTES_PATH',
-                       hint='Folder scanned recursively for *.md files'),
+        _tui.Picker('Markdown source mode', 'MARKDOWN_SOURCE_MODE', _MARKDOWN_SOURCE_MODE_OPTIONS,
+                    hint='Scan a folder recursively, or use a single .md file'),
+        _tui.TextInput('Markdown notes path', 'MARKDOWN_NOTES_PATH',
+                       hint='Folder or .md file, per Markdown source mode above'),
         _tui.Picker('Markdown extraction', 'MARKDOWN_EXTRACTION_MODE', _MARKDOWN_EXTRACTION_OPTIONS,
                     hint='Only used when Word source = Markdown notes'),
         _tui.Separator(),
@@ -2665,20 +2673,31 @@ def _extract_all_words(text):
 
 
 def _build_markdown_word_pool():
-    """Build the candidate word pool from config.MARKDOWN_NOTES_PATH,
-    per config.MARKDOWN_EXTRACTION_MODE. Returns [] (with a [WARN]) instead
-    of raising on a missing/empty path — this is a user-config boundary."""
+    """Build the candidate word pool from config.MARKDOWN_NOTES_PATH — a
+    folder (scanned recursively) or a single .md file, per
+    config.MARKDOWN_SOURCE_MODE — extracted per
+    config.MARKDOWN_EXTRACTION_MODE. Returns [] (with a [WARN]) instead of
+    raising on a missing/invalid path — this is a user-config boundary."""
     root = getattr(config, 'MARKDOWN_NOTES_PATH', '')
-    if not root or not os.path.isdir(root):
-        print(col(f'  [WARN] MARKDOWN_NOTES_PATH "{root}" is not a valid folder — word pool is empty.', 'yellow'))
-        return []
+    source_mode = getattr(config, 'MARKDOWN_SOURCE_MODE', 'folder')
+
+    if source_mode == 'file':
+        if not root or not os.path.isfile(root) or not root.lower().endswith('.md'):
+            print(col(f'  [WARN] MARKDOWN_NOTES_PATH "{root}" is not a valid .md file — word pool is empty.', 'yellow'))
+            return []
+        paths = [root]
+    else:
+        if not root or not os.path.isdir(root):
+            print(col(f'  [WARN] MARKDOWN_NOTES_PATH "{root}" is not a valid folder — word pool is empty.', 'yellow'))
+            return []
+        paths = _iter_markdown_files(root)
 
     mode = getattr(config, 'MARKDOWN_EXTRACTION_MODE', 'highlights')
     highlights_seen = []
     highlights_seen_set = set()
     word_counts = Counter()
 
-    for path in _iter_markdown_files(root):
+    for path in paths:
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 raw = f.read()
