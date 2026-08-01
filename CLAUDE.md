@@ -119,6 +119,17 @@ Table: `cards`
 
 Table: `export_log` — tracks export history (date, type, card count)
 
+Table: `markdown_file_state` — per-file read tracking for `WORD_SOURCE =
+"markdown_notes"` (see § Word sources). One row per `(creation_mode,
+file_key)`: `file_key` is the tracked file's path relative to
+`MARKDOWN_NOTES_PATH` in folder mode, or its bare filename in file mode.
+`file_size` is the file's on-disk size as of the last time its baseline
+*fully converged* with its content — nullable, and deliberately left `NULL`
+whenever some of the file's current content hasn't been confirmed yet (see
+§ Word sources for why). `items_json` is a JSON array of the extracted
+items (highlight spans or words, lowercased) already accounted for in that
+file's baseline. `UNIQUE(creation_mode, file_key)`.
+
 Uniqueness constraint: `(creation_mode, content_key, meaning_id)` — one row per
 distinct piece of content per mode. Dedup is explicitly **per-mode, not
 global**: the same word (or phrase) appearing under two different
@@ -127,7 +138,10 @@ independent by design (e.g. a sentence already used as `text_example_phrase`
 supporting content in a `word_meaning` card can separately become the primary
 content of a `phrase_context` card). `get_processed_words(conn, creation_mode)`
 is likewise filtered per-mode, so a word already anchoring a `word_meaning`
-card remains eligible to anchor a `phrase_context` card too.
+card remains eligible to anchor a `phrase_context` card too. This is the
+dedup mechanism for `WORD_SOURCE = "frequency_list"`; `"markdown_notes"`
+uses `markdown_file_state` instead and deliberately does **not** consult
+`get_processed_words()` — see § Word sources.
 
 Soft migrations (additive `ALTER TABLE ADD COLUMN`, wrapped in
 `try/except: pass`) are applied on every `init_db()` call, so the schema can
@@ -461,57 +475,84 @@ already fully generic over `mode_def["front"]`/`["back"]`/
 
 `WORD_SOURCE` in config.py is a separate axis from `CREATION_MODE` — it
 controls *where the candidate word strings come from*, not what happens to
-them once picked. `_do_generate()` and `_run_headless()` both call
-`get_word_pool()` (main.py, right before the "Generation and export
-runners" section) instead of calling `top_n_list()` directly; everything
-downstream (`get_processed_words(conn, creation_mode)` filtering,
-`_generate_loop(conn, pending, limit)`) is unchanged and unaware of which
-source produced `pending` — it only ever consumes a plain `list[str]`.
+them once picked. The two sources use genuinely different dedup
+strategies, not just different pool builders, so they're dispatched
+separately rather than through one shared filter:
 
-`WORD_SOURCES` registry (structurally parallel to `AI_PROVIDER_CALLERS` /
-`CREATION_MODES`), each entry a zero-arg callable returning `list[str]`:
-- `"frequency_list"` (default) — `top_n_list(config.SOURCE_LANG,
-  config.TOTAL_WORD_POOL)`, i.e. exactly today's pre-feature behavior.
-- `"markdown_notes"` — `_build_markdown_word_pool()`: reads from
-  `config.MARKDOWN_NOTES_PATH`, per `config.MARKDOWN_SOURCE_MODE`:
-  - `"folder"` (default) — recursively walks `MARKDOWN_NOTES_PATH` for
-    `*.md` files (`_iter_markdown_files`, sorted by path for deterministic
-    pool order).
-  - `"file"` — treats `MARKDOWN_NOTES_PATH` as a single `.md` file; the
-    path must exist and end in `.md` or the same `[WARN]`-and-empty-pool
-    fallback below applies. `_iter_markdown_files()` is not called in this
-    mode — `_build_markdown_word_pool()` builds a one-element path list
-    directly.
-  Every resolved file is then stripped of markdown noise
-  (`_strip_markdown_noise` — YAML frontmatter, code fences/spans,
-  wikilinks/embeds/links, headings, via regex; no markdown-parser
-  dependency, since Obsidian's syntax surface is small and predictable
-  enough not to warrant one), then extracted per
-  `config.MARKDOWN_EXTRACTION_MODE`:
-  - `"highlights"` (recommended default) — `_extract_highlights()` pulls
-    `==highlighted==` spans, first-seen order, exact-duplicate-collapsed.
-    High-signal since it's explicit user curation.
-  - `"all_words"` — `_extract_all_words()` tokenizes every Unicode
-    alphabetic word (`\b[^\W\d_]{2,}\b`), ranked by descending frequency
-    (`collections.Counter`, alphabetical tiebreak for determinism). No
-    stopword filtering exists, so common function words dominate a
-    personal-notes corpus (unlike `wordfreq`'s curated corpus) — this is
-    why `highlights` is the recommended default, not `all_words`.
-  Either mode is capped at `config.TOTAL_WORD_POOL`, same sizing knob the
-  frequency-list source uses. An empty/invalid `MARKDOWN_NOTES_PATH` (for
-  the active `MARKDOWN_SOURCE_MODE`) prints a `[WARN]` and returns `[]`
-  rather than raising — a user-config boundary, handled the same way other
-  config-driven paths in this codebase are.
+- **`"frequency_list"`** (default) — `_do_generate()`/`_run_headless()`
+  call `get_word_pool()` (dispatches through the `WORD_SOURCES` registry to
+  `top_n_list(config.SOURCE_LANG, config.TOTAL_WORD_POOL)`), then filter
+  with `get_processed_words(conn, creation_mode)`: a **global, per-word**
+  dedup — once a word has any card in this `creation_mode`, it never
+  resurfaces, regardless of which run or source produced it. Correct for a
+  fixed frequency list, where a word is a word no matter when it's seen.
 
-No new third-party dependency was needed (pure `os`/`re`/`collections`), so
-unlike the `anthropic`/`pocket_tts` lazy-optional-import pattern (see
-§ AI provider layer / § Local TTS provider), this code is imported
+- **`"markdown_notes"`** — dedup is **per-file, not per-word**. A word
+  repeating across two different notes is not treated as a duplicate — it
+  legitimately flows through both times (the existing
+  `UNIQUE(creation_mode, content_key, meaning_id)` constraint + the
+  `card_exists()` check in `_generate_loop` are what actually stop a
+  literal duplicate *card* from being written; this filter is orthogonal to
+  that and never consults `get_processed_words()`). What *is* tracked is
+  which files have already been read: `_build_markdown_pending(conn,
+  creation_mode)` (main.py, replacing the old zero-arg
+  `_build_markdown_word_pool()`) resolves `config.MARKDOWN_NOTES_PATH` into
+  a file list exactly as before (`"folder"` — recursively walks it via
+  `_iter_markdown_files`, sorted by path; `"file"` — a single `.md` path),
+  strips markdown noise (`_strip_markdown_noise`), and extracts items per
+  `config.MARKDOWN_EXTRACTION_MODE` (`"highlights"` or `"all_words"`, same
+  extraction functions as before) — but does all of this **per file**,
+  diffed against a stored per-file baseline in the new `markdown_file_state`
+  table (see § Database schema), instead of merging everything into one
+  flat pool immediately:
+  - Each file is identified by `_markdown_file_key()`: its path relative to
+    `MARKDOWN_NOTES_PATH` in folder mode (so two same-named files in
+    different subfolders are tracked independently), or its bare filename
+    in file mode.
+  - If a file's current on-disk size still matches its stored `file_size`,
+    it's skipped outright — untouched since it last fully converged, no
+    re-read or re-diff needed.
+  - Otherwise it's re-extracted, and only items **not already in its stored
+    baseline** are new — these are what get submitted to the AI this run.
+    If nothing new turns up (content was only trimmed or reworded, nothing
+    added), the file contributes nothing to `pending`, and its baseline is
+    simply narrowed to whatever's still present (removed items quietly drop
+    out; no cards are ever deleted or generated for a removal).
+  - After `_generate_loop` runs, `_commit_markdown_file_state()` writes each
+    diffed file's new baseline back. Only items `_generate_loop` actually
+    *confirmed* (`on_word_done(word, True)` — the AI returned usable data;
+    same "skip and retry next run" semantics the AI-failure path already
+    had for the `cards` table, now extended to this baseline too — see
+    `_generate_loop`'s docstring) are folded in. Critically, `file_size` is
+    only advanced to the file's current on-disk size when the new baseline
+    **exactly equals** the file's full current item set — i.e. full
+    convergence. If `config.WORDS_PER_RUN` caps the run before every new
+    item in a file was attempted, `file_size` is left `NULL` on purpose:
+    writing the current size prematurely would make the size-shortcut
+    above wrongly treat the file as fully caught up next run, silently
+    losing the untouched remainder forever. Leaving it `NULL` just forces
+    one more cheap re-diff (regex + set difference, not an AI/audio/GIF
+    call) next run, which correctly re-surfaces what's left.
+
+Both extraction modes are still capped at `config.TOTAL_WORD_POOL` overall
+(across all files' new items combined, not per file). An empty/invalid
+`MARKDOWN_NOTES_PATH` (for the active `MARKDOWN_SOURCE_MODE`) still prints
+a `[WARN]` and returns an empty pool rather than raising.
+
+No new third-party dependency was needed (pure `os`/`re`/`json`), so unlike
+the `anthropic`/`pocket_tts` lazy-optional-import pattern (see § AI
+provider layer / § Local TTS provider), this code is imported
 unconditionally at the top of main.py.
 
-**Known limitation**: no lemmatization/stemming exists anywhere in this
-codebase. A word extracted from prose keeps whatever inflected/conjugated
-surface form it appeared in — it is not normalized to a dictionary form,
-so e.g. "mangera" and "manger" are treated as two unrelated anchor words.
+**Known limitations**: no lemmatization/stemming exists anywhere in this
+codebase — a word extracted from prose keeps whatever inflected/conjugated
+surface form it appeared in, so e.g. "mangera" and "manger" are treated as
+two unrelated anchor words. A moved or renamed file (its path relative to
+`MARKDOWN_NOTES_PATH` changes) is indistinguishable from a brand-new file —
+its `file_key` no longer matches any stored row, so its content is
+re-diffed from scratch against an empty baseline; already-carded words are
+still deduped only by the DB's own uniqueness constraint, not by any memory
+of the old file's history.
 
 **Deferred (not built)**: passing the *actual sentence* a markdown-sourced
 word was found in through to the AI prompt as authentic context (would

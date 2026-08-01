@@ -35,7 +35,6 @@ import shutil
 import sqlite3
 import hashlib
 import requests
-from collections import Counter
 import genanki
 from gtts import gTTS
 from wordfreq import top_n_list
@@ -278,6 +277,17 @@ def init_db():
             date       TEXT    DEFAULT (datetime('now')),
             type       TEXT,
             card_count INTEGER DEFAULT 0
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS markdown_file_state (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            creation_mode TEXT    NOT NULL,
+            file_key      TEXT    NOT NULL,
+            file_size     INTEGER,
+            items_json    TEXT    NOT NULL DEFAULT '[]',
+            date_updated  TEXT    DEFAULT (datetime('now')),
+            UNIQUE(creation_mode, file_key)
         )
     """)
     migrations = [
@@ -2672,66 +2682,172 @@ def _extract_all_words(text):
     return [w.lower() for w in _MD_WORD_RE.findall(text)]
 
 
-def _build_markdown_word_pool():
-    """Build the candidate word pool from config.MARKDOWN_NOTES_PATH — a
-    folder (scanned recursively) or a single .md file, per
-    config.MARKDOWN_SOURCE_MODE — extracted per
-    config.MARKDOWN_EXTRACTION_MODE. Returns [] (with a [WARN]) instead of
-    raising on a missing/invalid path — this is a user-config boundary."""
+WORD_SOURCES = {
+    "frequency_list": lambda: top_n_list(config.SOURCE_LANG, config.TOTAL_WORD_POOL),
+}
+
+
+def get_word_pool():
+    """Dispatch to the active config.WORD_SOURCE's pool builder.
+    markdown_notes bypasses this entirely — see _build_markdown_pending()
+    and get_pending_words(), since that source needs DB access
+    (per-file diffing) that a zero-arg pool builder can't provide."""
+    source = getattr(config, 'WORD_SOURCE', 'frequency_list')
+    return WORD_SOURCES.get(source, WORD_SOURCES['frequency_list'])()
+
+
+def _markdown_file_key(path, root, source_mode):
+    """Stable identity for a tracked markdown file: path relative to
+    MARKDOWN_NOTES_PATH in folder mode (so same-named files in different
+    subfolders are tracked independently), or the bare filename in file
+    mode (only one file exists, nothing to disambiguate)."""
+    if source_mode == 'file':
+        return os.path.basename(path)
+    return os.path.relpath(path, root)
+
+
+def _dedup_ordered_ci(items):
+    """First-seen order, case-insensitive dedup — the same rule the old
+    highlights pool builder used, now reused by the per-file diff."""
+    seen, ordered = set(), []
+    for item in items:
+        key = item.lower()
+        if key not in seen:
+            seen.add(key)
+            ordered.append(item)
+    return ordered
+
+
+def get_markdown_file_state(conn, creation_mode, file_key):
+    """Stored (file_size, baseline_items) for a tracked file in this
+    creation_mode. file_size is None if the file's baseline has never
+    fully converged with its on-disk content (see _build_markdown_pending's
+    docstring) or if the file has never been seen before."""
+    row = conn.execute(
+        "SELECT file_size, items_json FROM markdown_file_state WHERE creation_mode=? AND file_key=?",
+        (creation_mode, file_key)
+    ).fetchone()
+    if not row:
+        return None, set()
+    size, items_json = row
+    return size, set(json.loads(items_json))
+
+
+def _build_markdown_pending(conn, creation_mode):
+    """Per-file diff against markdown_file_state, for
+    WORD_SOURCE = "markdown_notes". Unlike the frequency-list source,
+    dedup here is per-file, not per-word: a file whose on-disk size still
+    matches its stored baseline is skipped outright (untouched since last
+    full read); otherwise it's re-extracted and only items not already in
+    its stored baseline are treated as new — repeats of the same word/
+    highlight across different files are NOT filtered here (the existing
+    UNIQUE(creation_mode, content_key, meaning_id) constraint + card_exists()
+    check in _generate_loop is what actually prevents a duplicate card).
+
+    Returns (pending, item_sources, file_snapshot):
+      - pending: deduped, order-preserved list of new items, capped at
+        config.TOTAL_WORD_POOL
+      - item_sources: {item: {file_key, ...}} — which changed file(s)
+        contributed each pending item
+      - file_snapshot: {file_key: {"size", "current_items"}} for every
+        file that was actually re-diffed this run (files skipped via the
+        size shortcut are absent — nothing changed, nothing to commit)
+
+    _commit_markdown_file_state() uses item_sources/file_snapshot, together
+    with which words _generate_loop actually confirmed, to update baselines
+    after the run."""
     root = getattr(config, 'MARKDOWN_NOTES_PATH', '')
     source_mode = getattr(config, 'MARKDOWN_SOURCE_MODE', 'folder')
+    extraction_mode = getattr(config, 'MARKDOWN_EXTRACTION_MODE', 'highlights')
 
     if source_mode == 'file':
         if not root or not os.path.isfile(root) or not root.lower().endswith('.md'):
             print(col(f'  [WARN] MARKDOWN_NOTES_PATH "{root}" is not a valid .md file — word pool is empty.', 'yellow'))
-            return []
+            return [], {}, {}
         paths = [root]
     else:
         if not root or not os.path.isdir(root):
             print(col(f'  [WARN] MARKDOWN_NOTES_PATH "{root}" is not a valid folder — word pool is empty.', 'yellow'))
-            return []
+            return [], {}, {}
         paths = _iter_markdown_files(root)
 
-    mode = getattr(config, 'MARKDOWN_EXTRACTION_MODE', 'highlights')
-    highlights_seen = []
-    highlights_seen_set = set()
-    word_counts = Counter()
+    pending, pending_seen = [], set()
+    item_sources = {}
+    file_snapshot = {}
 
     for path in paths:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        file_key = _markdown_file_key(path, root, source_mode)
+        stored_size, baseline_items = get_markdown_file_state(conn, creation_mode, file_key)
+
+        if stored_size is not None and stored_size == size:
+            continue  # unchanged since last full convergence
+
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 raw = f.read()
         except OSError:
             continue
         cleaned = _strip_markdown_noise(raw)
+        raw_items = _extract_highlights(cleaned) if extraction_mode == 'highlights' else _extract_all_words(cleaned)
+        current_ordered = _dedup_ordered_ci(raw_items)
+        current_set = {i.lower() for i in current_ordered} if extraction_mode == 'highlights' else set(current_ordered)
 
-        if mode == 'highlights':
-            for span in _extract_highlights(cleaned):
-                key = span.lower()
-                if key not in highlights_seen_set:
-                    highlights_seen_set.add(key)
-                    highlights_seen.append(span)
+        file_snapshot[file_key] = {"size": size, "current_items": current_set}
+
+        for item in current_ordered:
+            key = item.lower() if extraction_mode == 'highlights' else item
+            if key in baseline_items:
+                continue
+            item_sources.setdefault(item, set()).add(file_key)
+            if item not in pending_seen:
+                pending_seen.add(item)
+                pending.append(item)
+
+    return pending[:config.TOTAL_WORD_POOL], item_sources, file_snapshot
+
+
+def _commit_markdown_file_state(conn, creation_mode, file_snapshot, item_sources, confirmed_words):
+    """Persist each re-diffed file's new baseline after _generate_loop has
+    run. Only items _generate_loop actually confirmed (AI succeeded, at
+    least one item returned) enter the baseline — an item whose AI call
+    failed is deliberately left out so it's retried next run, same
+    guarantee the word-level path already gives (see _generate_loop's
+    on_word_done). file_size is only advanced to the file's current
+    on-disk size when the baseline fully converges with its current
+    content; otherwise it's left NULL so a WORDS_PER_RUN-truncated file
+    doesn't get wrongly skipped by the size shortcut next run."""
+    highlights = getattr(config, 'MARKDOWN_EXTRACTION_MODE', 'highlights') == 'highlights'
+    for file_key, snap in file_snapshot.items():
+        stored_size, baseline_items = get_markdown_file_state(conn, creation_mode, file_key)
+        newly_confirmed = {
+            (item.lower() if highlights else item)
+            for item, sources in item_sources.items()
+            if file_key in sources and item in confirmed_words
+        }
+        new_baseline = (baseline_items | newly_confirmed) & snap["current_items"]
+        converged = new_baseline == snap["current_items"]
+        new_size = snap["size"] if converged else None
+        existing = conn.execute(
+            "SELECT id FROM markdown_file_state WHERE creation_mode=? AND file_key=?",
+            (creation_mode, file_key)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE markdown_file_state SET file_size=?, items_json=?, date_updated=datetime('now') "
+                "WHERE creation_mode=? AND file_key=?",
+                (new_size, json.dumps(sorted(new_baseline)), creation_mode, file_key)
+            )
         else:
-            word_counts.update(_extract_all_words(cleaned))
-
-    if mode == 'highlights':
-        pool = highlights_seen
-    else:
-        pool = [w for w, _count in sorted(word_counts.items(), key=lambda kv: (-kv[1], kv[0]))]
-
-    return pool[:config.TOTAL_WORD_POOL]
-
-
-WORD_SOURCES = {
-    "frequency_list": lambda: top_n_list(config.SOURCE_LANG, config.TOTAL_WORD_POOL),
-    "markdown_notes": _build_markdown_word_pool,
-}
-
-
-def get_word_pool():
-    """Dispatch to the active config.WORD_SOURCE's pool builder."""
-    source = getattr(config, 'WORD_SOURCE', 'frequency_list')
-    return WORD_SOURCES.get(source, WORD_SOURCES['frequency_list'])()
+            conn.execute(
+                "INSERT INTO markdown_file_state (creation_mode, file_key, file_size, items_json) "
+                "VALUES (?, ?, ?, ?)",
+                (creation_mode, file_key, new_size, json.dumps(sorted(new_baseline)))
+            )
+    conn.commit()
 
 
 # ─────────────────────────────────────────────
@@ -2754,22 +2870,38 @@ def _do_generate(conn):
         print(col('  [WARN] GIPHY_API_KEY not set — GIFs disabled for this run.', 'yellow'))
         config.ENABLE_GIF = False
 
-    all_words = get_word_pool()
-    processed = get_processed_words(conn, current_creation_mode())
-    pending   = [w for w in all_words if w not in processed]
+    creation_mode = current_creation_mode()
+    markdown_mode = getattr(config, 'WORD_SOURCE', 'frequency_list') == 'markdown_notes'
 
-    print(f'\n  Word pool   : {col(str(len(all_words)), "yellow")}')
-    print(f'  In database : {col(str(len(processed)), "green")}')
-    print(f'  Pending     : {col(str(len(pending)), "cyan")}')
+    if markdown_mode:
+        pending, item_sources, file_snapshot = _build_markdown_pending(conn, creation_mode)
+        print(f'\n  Files scanned : {col(str(len(file_snapshot)), "yellow")}')
+        print(f'  New items     : {col(str(len(pending)), "cyan")}')
+    else:
+        all_words = get_word_pool()
+        processed = get_processed_words(conn, creation_mode)
+        pending   = [w for w in all_words if w not in processed]
+        print(f'\n  Word pool   : {col(str(len(all_words)), "yellow")}')
+        print(f'  In database : {col(str(len(processed)), "green")}')
+        print(f'  Pending     : {col(str(len(pending)), "cyan")}')
     print(f'  This run    : {col(f"up to {config.WORDS_PER_RUN} words", "yellow")}')
     print()
 
     if not pending:
-        print(col('  [WARN] Word pool exhausted!', 'yellow'))
-        print(f'  Increase TOTAL_WORD_POOL in config.py (currently {config.TOTAL_WORD_POOL}).')
+        if markdown_mode:
+            print(col('  [INFO] No new content found in tracked files.', 'yellow'))
+        else:
+            print(col('  [WARN] Word pool exhausted!', 'yellow'))
+            print(f'  Increase TOTAL_WORD_POOL in config.py (currently {config.TOTAL_WORD_POOL}).')
         return
 
-    _generate_loop(conn, pending, config.WORDS_PER_RUN)
+    if markdown_mode:
+        confirmed_words = set()
+        _generate_loop(conn, pending, config.WORDS_PER_RUN,
+                        on_word_done=lambda w, ok: confirmed_words.add(w) if ok else None)
+        _commit_markdown_file_state(conn, creation_mode, file_snapshot, item_sources, confirmed_words)
+    else:
+        _generate_loop(conn, pending, config.WORDS_PER_RUN)
 
 
 def run_generate(conn):
@@ -2801,8 +2933,16 @@ def run_export(conn):
     pause()
 
 
-def _generate_loop(conn, pending, limit):
-    """Core word-processing loop used by both interactive and headless modes."""
+def _generate_loop(conn, pending, limit, on_word_done=None):
+    """Core word-processing loop used by both interactive and headless modes.
+    on_word_done(word, success), if given, fires once per word actually
+    iterated — success=False on the two AI-failure/empty-items skip paths
+    below (so a caller can exclude the word from its own "confirmed" state,
+    same retry-next-run guarantee _generate_loop already gives the cards
+    table itself), success=True otherwise, including when every item for
+    that word turned out to be a card_exists() duplicate — used by the
+    markdown_notes per-file baseline (_build_markdown_pending /
+    _commit_markdown_file_state)."""
     processed_count  = 0
     creation_mode    = current_creation_mode()
     mode_def         = CREATION_MODES[creation_mode]
@@ -2833,6 +2973,8 @@ def _generate_loop(conn, pending, limit):
             # word forever. Leaving it unsaved means it's just picked up
             # again on the next run.
             print(col('    [WARN] AI failed — skipping (will retry next run)', 'yellow'))
+            if on_word_done:
+                on_word_done(word, False)
             processed_count += 1
             continue
 
@@ -2841,6 +2983,8 @@ def _generate_loop(conn, pending, limit):
 
         if not items:
             print(col('    [WARN] No content returned — skipping', 'yellow'))
+            if on_word_done:
+                on_word_done(word, False)
             processed_count += 1
             continue
 
@@ -2929,6 +3073,8 @@ def _generate_loop(conn, pending, limit):
             cat_suffix = col(f'  [{category}]', 'cyan') if category else ''
             print(col(f'    [DONE] [{word_label}] {text_meaning[:60]}...', 'green') + cat_suffix)
 
+        if on_word_done:
+            on_word_done(word, True)
         processed_count += 1
 
     print(col(f'\n  {processed_count} words processed this run.', 'green', 'bold'))
@@ -3038,20 +3184,35 @@ def _run_headless():
         print("\n[WARN] GIPHY_API_KEY not set — GIFs will be disabled.")
         config.ENABLE_GIF = False
 
-    conn      = init_db()
-    all_words = get_word_pool()
-    processed = get_processed_words(conn, current_creation_mode())
-    pending   = [w for w in all_words if w not in processed]
+    conn          = init_db()
+    creation_mode = current_creation_mode()
+    markdown_mode = getattr(config, 'WORD_SOURCE', 'frequency_list') == 'markdown_notes'
 
-    print(f"\n  Word pool   : {len(all_words)}")
-    print(f"  In database : {len(processed)}")
-    print(f"  Pending     : {len(pending)}")
+    if markdown_mode:
+        pending, item_sources, file_snapshot = _build_markdown_pending(conn, creation_mode)
+        print(f"\n  Files scanned : {len(file_snapshot)}")
+        print(f"  New items     : {len(pending)}")
+    else:
+        all_words = get_word_pool()
+        processed = get_processed_words(conn, creation_mode)
+        pending   = [w for w in all_words if w not in processed]
+        print(f"\n  Word pool   : {len(all_words)}")
+        print(f"  In database : {len(processed)}")
+        print(f"  Pending     : {len(pending)}")
     print(f"  This run    : up to {config.WORDS_PER_RUN} words\n")
 
     if not pending:
-        print("[WARN] Word pool exhausted!")
-        print(f"   Increase TOTAL_WORD_POOL in config.py "
-              f"(currently {config.TOTAL_WORD_POOL}) and run again.")
+        if markdown_mode:
+            print("[INFO] No new content found in tracked files.")
+        else:
+            print("[WARN] Word pool exhausted!")
+            print(f"   Increase TOTAL_WORD_POOL in config.py "
+                  f"(currently {config.TOTAL_WORD_POOL}) and run again.")
+    elif markdown_mode:
+        confirmed_words = set()
+        _generate_loop(conn, pending, config.WORDS_PER_RUN,
+                        on_word_done=lambda w, ok: confirmed_words.add(w) if ok else None)
+        _commit_markdown_file_state(conn, creation_mode, file_snapshot, item_sources, confirmed_words)
     else:
         _generate_loop(conn, pending, config.WORDS_PER_RUN)
 

@@ -260,6 +260,27 @@ pulled out of your notes:
 
 `TOTAL_WORD_POOL` still caps the pool size in either mode.
 
+**Dedup works differently for markdown notes than for the frequency list.**
+The frequency list dedups globally by word: once a word has a card, it
+never comes up again. Markdown notes dedup **per file** instead — the same
+word appearing in two different notes is not treated as a duplicate and
+will produce a card from each note. What's tracked is which *files* have
+already been read: every file's size is checked against what was recorded
+last time.
+- If the size is unchanged, the file is skipped — nothing new to read.
+- If the size changed, the file is re-scanned and only genuinely **new**
+  content (words/highlights not seen before in that file) gets turned into
+  cards.
+- If content was only removed or edited down (nothing new added), no cards
+  are generated at all for that file.
+
+This means you can keep adding to the same ongoing notes file over time —
+each run only picks up what's new since the last time that file was read,
+while old, unrelated notes elsewhere in your vault are left alone even if
+they happen to reuse the same words. Moving or renaming a file resets its
+tracking (it's read as if brand-new), since a renamed file can't be told
+apart from a genuinely new one.
+
 **Known limitation**: there is no lemmatization/stemming. A conjugated verb
 or plural noun found in your notes is treated as its own distinct word from
 its dictionary form (e.g. "mangera" won't be recognized as "manger").
