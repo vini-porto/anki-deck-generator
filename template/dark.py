@@ -110,21 +110,25 @@ hr { border: none; border-top: 1px solid #313244; margin: 14px 0; }
 }
 """
 
-FRONT = """
-<div class="word">{{Word}}</div>
-{{Gender}}
-<div class="ipa">/ {{IPA}} /</div>
-{{Sound_Word}}
-<div class="gif-box">{{Image}}</div>
-<div class="example">{{Text_Example_Phrase}}</div>
-<div class="example-translation">{{Text_Example_Translation}}</div>
-{{Sound_Example}}
-"""
-
-BACK = """
-{{FrontSide}}
-<hr>
-<div class="meaning">{{Text_Meaning}}</div>
-{{Sound_Meaning}}
-{{Synonyms}}
-"""
+# Per-field HTML fragments, assembled dynamically at export time by
+# _assemble_side() (main.py) in whatever position/order the user's
+# CARD_FIELDS_JSON checklist specifies — see CLAUDE.md § Card fields.
+# Each div-wrapped field uses {{#Field}}...{{/Field}} so a field that's
+# enabled but happens to come back empty for a specific card (AI miss,
+# no GIF match, etc.) renders nothing instead of an empty box. The
+# audio/gender/synonyms fields already self-blank via their own Python
+# helpers (sound_tag()/gender_badge()/format_synonyms()), so they don't
+# need the wrapper.
+FIELD_HTML = {
+    "word":                     '{{#Word}}<div class="word">{{Word}}</div>{{/Word}}',
+    "gender":                   '{{Gender}}',
+    "ipa":                      '{{#IPA}}<div class="ipa">/ {{IPA}} /</div>{{/IPA}}',
+    "audio_word":               '{{Sound_Word}}',
+    "image":                    '{{#Image}}<div class="gif-box">{{Image}}</div>{{/Image}}',
+    "text_example_phrase":      '{{#Text_Example_Phrase}}<div class="example">{{Text_Example_Phrase}}</div>{{/Text_Example_Phrase}}',
+    "text_example_translation": '{{#Text_Example_Translation}}<div class="example-translation">{{Text_Example_Translation}}</div>{{/Text_Example_Translation}}',
+    "audio_example":            '{{Sound_Example}}',
+    "text_meaning":             '{{#Text_Meaning}}<div class="meaning">{{Text_Meaning}}</div>{{/Text_Meaning}}',
+    "audio_meaning":            '{{Sound_Meaning}}',
+    "synonyms":                 '{{Synonyms}}',
+}

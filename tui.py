@@ -53,6 +53,16 @@ def _init_colors():
 #  Banner and chrome
 # ─────────────────────────────────────────────
 
+# Duplicated (not imported) from main.py's _MODE_LABELS — tui.py already
+# avoids a circular import with main.py by lazily importing write_config
+# inside methods rather than at module scope; a 2-entry dict is cheap
+# enough to just keep in sync by hand rather than adding an import path.
+_MODE_LABELS = {
+    'markdown_notes': 'Annotation Mode',
+    'frequency_list': 'Spontaneous Mode (AI)',
+}
+
+
 def _draw_banner(win):
     h, w = win.getmaxyx()
     try:
@@ -66,9 +76,10 @@ def _draw_banner(win):
 
         win.addstr(2, 0, ('╠' + border + '╣')[:w], _cp('cyan'))
 
+        mode_label = _MODE_LABELS.get(getattr(_cfg, 'WORD_SOURCE', ''))
+        mode_part = f'   |   mode: {mode_label}' if mode_label else ''
         info = (f'  {_cfg.SOURCE_LANG.upper()} -> {_cfg.TARGET_LANG}'
-                f'   |   template: {_cfg.CARD_TEMPLATE}'
-                f'   |   type: {_cfg.CARD_TYPE}')
+                f'   |   template: {_cfg.CARD_TEMPLATE}{mode_part}')
         win.addstr(3, 0, '║', _cp('cyan'))
         win.addstr(3, 1, info.ljust(w - 2)[:w - 2], _cp('dim'))
         win.addstr(3, w - 1, '║', _cp('cyan'))
@@ -78,9 +89,29 @@ def _draw_banner(win):
         pass
 
 
-def _draw_statusbar(win):
+# One legend per focused row's kind, replacing the 4 duplicated inline
+# hint strings each widget used to render on its own row (Toggle/Picker/
+# TextInput/NumberInput) plus the old always-generic, focus-blind status
+# bar. `type(focused_item)` drives which line shows; Separator/None (no
+# selectable item, e.g. an empty list) fall back to the anchors alone.
+_STATUSBAR_HINTS = {
+    'Action':      'Enter open',
+    'Back':        'Enter back',
+    'Toggle':      'Space/Enter toggle',
+    'Picker':      '← → cycle',
+    'NumberInput': '← → adjust · Enter type exact value',
+    'TextInput':   'Enter edit',
+}
+
+
+def _draw_statusbar(win, focused_item=None):
     h, w = win.getmaxyx()
-    bar = '  ↑↓ navigate   ←→ change value   Enter select   Esc / q  back  '
+    kind_hint = _STATUSBAR_HINTS.get(type(focused_item).__name__)
+    parts = ['↑↓ navigate']
+    if kind_hint:
+        parts.append(kind_hint)
+    parts.append('Esc / q back')
+    bar = '  ' + '   '.join(parts) + '  '
     try:
         win.addstr(h - 1, 0, bar.ljust(w - 1)[:w - 1], _cp('focus'))
     except curses.error:
@@ -286,7 +317,10 @@ class Action(MenuItem):
 
     def on_enter(self, win):
         if self.print_mode:
-            # Suspend curses, run print-based function, restore curses
+            # Suspend curses, run print-based function, restore curses.
+            # The function's return value is never useful here — curses is
+            # torn down for the duration, so there's no menu loop above to
+            # propagate a 'back' token to.
             win.clear()
             win.refresh()
             curses.endwin()
@@ -300,9 +334,8 @@ class Action(MenuItem):
                 saved.keypad(True)
                 _init_colors()
                 curses.curs_set(0)
-        else:
-            self.func()
-        return None
+            return None
+        return self.func()
 
 
 class Toggle(MenuItem):
@@ -326,9 +359,8 @@ class Toggle(MenuItem):
         prefix_attr = (_cp('cyan') | curses.A_BOLD) if focused else 0
         ind         = ' ON ' if val else ' OFF'
         ind_attr    = (_cp('green') | curses.A_BOLD) if val else (_cp('red') | curses.A_BOLD)
-        hint_str    = '  Space/Enter to toggle' if focused else ''
 
-        label_w = max(10, avail_w - len(prefix) - len(ind) - 4 - len(hint_str))
+        label_w = max(10, avail_w - len(prefix) - len(ind) - 4)
         label_p = self.label.ljust(label_w)[:label_w]
 
         try:
@@ -341,9 +373,6 @@ class Toggle(MenuItem):
             win.addstr(y, cx, ind, ind_attr)
             cx += len(ind)
             win.addstr(y, cx, ']', _cp('dim'))
-            cx += 1
-            if focused and hint_str:
-                win.addstr(y, cx, hint_str, _cp('dim'))
         except curses.error:
             pass
 
@@ -393,13 +422,11 @@ class Picker(MenuItem):
         if focused:
             val_str  = f' ◀ {display} ▶ '
             val_attr = _cp('yellow') | curses.A_BOLD
-            hint_str = '  ← → cycle'
         else:
             val_str  = f'   {display}'
             val_attr = _cp('yellow')
-            hint_str = ''
 
-        label_w = max(10, avail_w - len(prefix) - len(val_str) - len(hint_str))
+        label_w = max(10, avail_w - len(prefix) - len(val_str))
         label_p = self.label.ljust(label_w)[:label_w]
 
         try:
@@ -408,9 +435,6 @@ class Picker(MenuItem):
             win.addstr(y, cx, label_p)
             cx += len(label_p)
             win.addstr(y, cx, val_str, val_attr)
-            cx += len(val_str)
-            if focused and hint_str:
-                win.addstr(y, cx, hint_str, _cp('dim'))
         except curses.error:
             pass
 
@@ -451,14 +475,13 @@ class TextInput(MenuItem):
         prefix      = '▶ ' if focused else '  '
         prefix_attr = (_cp('cyan') | curses.A_BOLD) if focused else 0
         display     = self._display()
-        hint_str    = '  Enter to edit' if focused else ''
         val_attr    = (_cp('yellow') | curses.A_BOLD) if focused else _cp('yellow')
 
         not_set = display == '[not set]'
         if not_set:
             val_attr = (_cp('red') | curses.A_BOLD) if focused else _cp('red')
 
-        label_w = max(10, avail_w - len(prefix) - len(display) - 4 - len(hint_str))
+        label_w = max(10, avail_w - len(prefix) - len(display) - 4)
         label_p = self.label.ljust(label_w)[:label_w]
 
         try:
@@ -469,9 +492,6 @@ class TextInput(MenuItem):
             win.addstr(y, cx, '  ')
             cx += 2
             win.addstr(y, cx, display, val_attr)
-            cx += len(display)
-            if focused and hint_str:
-                win.addstr(y, cx, hint_str, _cp('dim'))
         except curses.error:
             pass
 
@@ -515,7 +535,6 @@ class NumberInput(MenuItem):
         prefix      = '▶ ' if focused else '  '
         prefix_attr = (_cp('cyan') | curses.A_BOLD) if focused else 0
         display     = self._display()
-        hint_str    = '  ← → adjust, Enter to type' if focused else ''
 
         if focused:
             val_str  = f' ◀ {display} ▶ '
@@ -524,7 +543,7 @@ class NumberInput(MenuItem):
             val_str  = f'   {display}'
             val_attr = _cp('yellow')
 
-        label_w = max(10, avail_w - len(prefix) - len(val_str) - len(hint_str))
+        label_w = max(10, avail_w - len(prefix) - len(val_str))
         label_p = self.label.ljust(label_w)[:label_w]
 
         try:
@@ -533,9 +552,6 @@ class NumberInput(MenuItem):
             win.addstr(y, cx, label_p)
             cx += len(label_p)
             win.addstr(y, cx, val_str, val_attr)
-            cx += len(val_str)
-            if focused and hint_str:
-                win.addstr(y, cx, hint_str, _cp('dim'))
         except curses.error:
             pass
 
@@ -608,7 +624,7 @@ def _run_inner(title, items, stdscr):
                     pass
             items[i].render(stdscr, y, 2, focused, avail_w)
 
-        _draw_statusbar(stdscr)
+        _draw_statusbar(stdscr, items[current] if items else None)
         stdscr.refresh()
 
         key = stdscr.getch()

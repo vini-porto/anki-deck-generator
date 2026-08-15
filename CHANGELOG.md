@@ -13,6 +13,80 @@ shown in the README badge and in both interactive menus.
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-08-15
+### Changed
+- **Menu restructured around two top-level creation modes**: "Annotation
+  Mode" (cards from words/phrases highlighted in your notes) and
+  "Spontaneous Mode (AI)" (AI invents words and content from scratch),
+  replacing the old nested Word source picker. Mode selection is now the
+  very first screen the app shows — above the Main Menu, not a step inside
+  Generate new cards — and every other screen (Generate, Export, Configure,
+  Statistics) is scoped to whichever mode is active; Configure → Generation
+  in particular now only shows the settings relevant to that mode
+  (Markdown notes settings for Annotation, Meaning exhaustiveness for
+  Spontaneous). "Exit" on the mode-scoped Main Menu returns to mode
+  selection rather than quitting the app, so switching modes mid-session
+  doesn't require a restart. Mode selection is session-only by design —
+  picking one never rewrites `config.py`.
+- **Card content is now a checkbox field configuration**, not a choice
+  between pre-built card shapes. Step 2 of Generate new cards lets you
+  enable/disable each of the 11 fields and set its position (front/back),
+  order, and interaction (reveal / type-the-answer / cloze deletion for
+  the example phrase) — replacing `CREATION_MODE` (8 fixed modes),
+  `CARD_TYPE`, `CREATION_MODE_VERBOSITY`, and the 4-axis "Card content"
+  cascading picker entirely. New `CARD_FIELDS_JSON` config key.
+- **Export is automatic.** Generating cards now exports `deck_new.apkg`/
+  `deck_full.apkg` at the end with zero prompts — the old card-type
+  selection step before export is gone. The manual "Export decks" menu
+  action still exists (for rebuilding a backup on demand) — it now shows
+  recent export history, then prompts for an output filename and writes a
+  single full-backup `.apkg`.
+- **Annotation Mode now passes real note context to the AI**: a
+  highlighted word/phrase and the sentence it was found in are used
+  directly as the Word/Example phrase fields' content (no AI call wasted
+  on them), and every other requested field is AI-generated using that
+  quoted sentence as authentic context — instead of being generated from
+  the bare word with no context, as before.
+### Removed
+- "Basic + Reversed" (auto-generating a second, flipped meaning→word card
+  per note) has no equivalent in the new field-checklist system and is not
+  carried forward. Cards already exported to Anki are unaffected.
+- The `CREATION_MODE`/`CARD_TYPE`/`CREATION_MODE_VERBOSITY` config keys and
+  the entire 8-mode `CREATION_MODES` registry are deleted outright (clean
+  break, not deprecated). `progress.db` rows created before this release
+  keep their old shape but are no longer reachable by export — a one-time
+  `[WARN]` flags any that are still un-exported.
+- The Giphy API key moved from AI & API Settings to GIF Settings, since
+  it's only ever used by GIF fetching — it was never actually read by
+  anything under AI & API Settings.
+- The Main Menu's "Configure" row now shows a `⚠ N` warning count when an
+  AI provider key or the Giphy key (while GIFs are enabled) is still
+  unset, instead of only surfacing that one screen deeper.
+- Every interactive row's separate inline hint ("Space/Enter to toggle",
+  "← → cycle", "← → adjust, Enter to type", "Enter to edit") was removed
+  in favor of one status bar/footer that shows the right hint for
+  whatever's currently focused — previously both existed at once, and the
+  always-on status bar never actually matched the focused row's controls.
+- The active Creation Mode (Annotation / Spontaneous AI) is now shown in
+  the persistent header on every screen, not just the Main Menu's own
+  title — no more losing track of which mode is active while deep in
+  Configure.
+- Statistics again include a category/subdeck breakdown in both TUIs
+  (previously computed only by the Python curses screen, never exposed to
+  the JS bridge).
+### Fixed
+- `write_config()` now appends a config.py key that doesn't exist yet
+  instead of failing — needed for `CARD_FIELDS_JSON` on any config.py
+  written before this release, but fixes the same latent gap for every
+  future new setting too.
+- Generating cards no longer re-exports and re-logs an identical full
+  backup when a run finds nothing new (exhausted pool, no new markdown
+  content, every AI call failed) — "Recent exports" was piling up
+  near-duplicate-looking entries every time Generate ran, even as a no-op.
+- Ctrl+C during interactive navigation now exits the Python TUI cleanly
+  instead of crashing with a raw traceback, matching the JS TUI's
+  existing clean-exit behavior.
+
 ## [2.5.0] - 2026-07-26
 ### Added
 - `MEANING_EXHAUSTIVENESS` setting — choose how many distinct meanings the

@@ -51,6 +51,13 @@ function getCfgStore() {
         await bridge.setConfig(key, value, type);
         cfg = { ...cfg, [key]: coerceLocal(value, type) };
       },
+      // Mutates the in-process cache only — never calls bridge.setConfig,
+      // so config.py is never rewritten. Used for the mode picker's
+      // session-only WORD_SOURCE (confirmed with the user it should not
+      // become a new persistent default just from being selected).
+      setLocal(key, value) {
+        cfg = { ...cfg, [key]: value };
+      },
     };
   }
   return _cfgStore;
@@ -115,6 +122,10 @@ function separatorItem() {
   return { kind: 'separator' };
 }
 
+function infoItem(text) {
+  return { kind: 'info', text };
+}
+
 // ── Shared header data ──────────────────────────────────────────────────
 
 function bannerSummary() {
@@ -124,7 +135,9 @@ function bannerSummary() {
   const providerLabel = options.provider_labels[provider] || provider;
   const modelField = options.provider_model_field[provider] || 'AI_MODEL';
   const model = cfg[modelField] || '';
-  return `${String(cfg.SOURCE_LANG).toUpperCase()} -> ${cfg.TARGET_LANG}   ·   ${cfg.CARD_TEMPLATE} / ${cfg.CARD_TYPE}   ·   ${providerLabel} (${model})`;
+  const modeLabel = MODE_LABELS[cfg.WORD_SOURCE];
+  const modePart = modeLabel ? `   ·   ${modeLabel}` : '';
+  return `${String(cfg.SOURCE_LANG).toUpperCase()} -> ${cfg.TARGET_LANG}   ·   ${cfg.CARD_TEMPLATE}   ·   ${providerLabel} (${model})${modePart}`;
 }
 
 function aiKeyMissing() {
@@ -133,6 +146,18 @@ function aiKeyMissing() {
   const keyField = options.provider_key_field[cfg.AI_PROVIDER];
   if (!keyField) return false; // ollama needs no key
   return String(cfg[keyField] || '').startsWith('your_');
+}
+
+function giphyKeyMissing() {
+  const cfg = getCfgStore().get();
+  return Boolean(cfg.ENABLE_GIF) && String(cfg.GIPHY_API_KEY || '') === 'your_giphy_api_key_here';
+}
+
+function getConfigWarnings() {
+  const warnings = [];
+  if (aiKeyMissing()) warnings.push('AI provider key missing');
+  if (giphyKeyMissing()) warnings.push('Giphy key missing');
+  return warnings;
 }
 
 // ── Settings screens (mirrors main.py's configure_* functions) ─────────
@@ -180,8 +205,6 @@ async function settingsAi(crumbs) {
       pickerItem('AI provider', 'AI_PROVIDER', options.ai_providers),
       actionItem('Provider settings', 'provider', `${label}  |  ${model}` + (aiKeyMissing() ? '   ! key missing' : '')),
       separatorItem(),
-      textItem('Giphy API key', 'GIPHY_API_KEY', { secret: true }),
-      separatorItem(),
       backItem(),
     ];
     const choice = await runScreen({ title: 'AI & API Settings', breadcrumb: trail, summary: bannerSummary(), items });
@@ -217,113 +240,140 @@ async function settingsDeck(crumbs) {
   await runScreen({ title: 'Deck & Card Settings', breadcrumb: trail, summary: bannerSummary(), items });
 }
 
-async function settingsGeneration(crumbs) {
+// mode: the active WORD_SOURCE value ('markdown_notes' | 'frequency_list')
+// — which settings show below depends on it, mirroring main.py's
+// configure_generation(mode).
+async function settingsGeneration(crumbs, mode) {
   const options = getOptions();
   const trail = [...crumbs, 'Generation'];
   const items = [
     numberItem('Words per run', 'WORDS_PER_RUN', { minVal: 1, step: 5 }),
     numberItem('Total word pool', 'TOTAL_WORD_POOL', { minVal: 100, step: 100 }),
     separatorItem(),
-    pickerItem('Meaning exhaustiveness', 'MEANING_EXHAUSTIVENESS', options.meaning_exhaustiveness_options),
-    separatorItem(),
-    pickerItem('Word source', 'WORD_SOURCE', options.word_sources),
-    pickerItem('Markdown source mode', 'MARKDOWN_SOURCE_MODE', options.markdown_source_modes),
-    textItem('Markdown notes path', 'MARKDOWN_NOTES_PATH'),
-    pickerItem('Markdown extraction', 'MARKDOWN_EXTRACTION_MODE', options.markdown_extraction_modes),
-    separatorItem(),
-    backItem(),
   ];
+  if (mode === 'markdown_notes') {
+    items.push(
+      pickerItem('Markdown source mode', 'MARKDOWN_SOURCE_MODE', options.markdown_source_modes),
+      textItem('Markdown notes path', 'MARKDOWN_NOTES_PATH'),
+      pickerItem('Markdown extraction', 'MARKDOWN_EXTRACTION_MODE', options.markdown_extraction_modes),
+    );
+  } else {
+    items.push(pickerItem('Meaning exhaustiveness', 'MEANING_EXHAUSTIVENESS', options.meaning_exhaustiveness_options));
+  }
+  items.push(separatorItem(), backItem());
   await runScreen({ title: 'Generation Settings', breadcrumb: trail, summary: bannerSummary(), items });
 }
 
-// ── Card content — one screen, 4 cascading pickers (Content/Front/Back/
-// Card type). Every (CREATION_MODE, CARD_TYPE) combo main.py ships is a
-// "leaf" in options.card_content_leaves (from --options-json); picking a
-// value for one axis narrows/resets the axes after it to the first still-
-// valid option — mirrors main.py's _card_content_resolve() exactly, kept
-// as an independent implementation since there's no shared runtime between
-// Python and JS to factor it into (same reasoning _CARD_TYPE_LABELS/
-// _WORD_TESTING_OPTIONS were already independently consumed under).
-// CREATION_MODE stays the one stored setting; CARD_TYPE joins it only for
-// the word_meaning-family leaves. See CLAUDE.md § Creation modes.
+// ── Card fields — the checkbox field configuration, step 2 of the
+// Generate wizard (see runGenerateWizard() / pickCreationMode() below).
+// Reads/writes config.CARD_FIELDS_JSON as a whole blob rather than one
+// config key per field — an independent JS implementation of main.py's
+// load_card_fields()/save_card_fields()/_field_detail_menu(), since
+// there's no shared runtime between Python and JS to factor it into (same
+// precedent the old cascading Card Content picker set). See CLAUDE.md
+// § Card fields.
 
-const CARD_CONTENT_AXES = ['content', 'front', 'back', 'card_type'];
+const POSITION_OPTIONS = [['front', 'Front'], ['back', 'Back']];
 
-function cardContentCurrentLeaf(leaves) {
+function loadCardFields() {
   const cfg = getCfgStore().get();
-  return leaves.find((l) => l.creation_mode === cfg.CREATION_MODE &&
-    (cfg.CREATION_MODE !== 'word_meaning' || l.stored_card_type === cfg.CARD_TYPE)) || leaves[0];
-}
-
-function cardContentAxisOptions(leaves, labels, axis, leaf) {
-  const prefix = CARD_CONTENT_AXES.slice(0, CARD_CONTENT_AXES.indexOf(axis));
-  const seen = new Set();
-  const opts = [];
-  for (const cand of leaves) {
-    if (prefix.every((a) => cand[a] === leaf[a]) && !seen.has(cand[axis])) {
-      seen.add(cand[axis]);
-      opts.push([cand[axis], labels[axis][cand[axis]]]);
-    }
+  try {
+    return JSON.parse(cfg.CARD_FIELDS_JSON || '[]');
+  } catch {
+    return [];
   }
-  return opts;
 }
 
-function cardContentResolve(leaves, axis, value) {
-  const leaf = cardContentCurrentLeaf(leaves);
-  const fixed = {};
-  CARD_CONTENT_AXES.slice(0, CARD_CONTENT_AXES.indexOf(axis)).forEach((a) => { fixed[a] = leaf[a]; });
-  fixed[axis] = value;
-  let candidates = leaves;
-  for (const a of CARD_CONTENT_AXES) {
-    if (a in fixed) {
-      const narrowed = candidates.filter((c) => c[a] === fixed[a]);
-      candidates = narrowed.length ? narrowed : candidates;
-    } else {
-      candidates = candidates.filter((c) => c[a] === candidates[0][a]);
-    }
-  }
-  return candidates[0];
+async function saveCardFields(fields) {
+  await getCfgStore().set('CARD_FIELDS_JSON', JSON.stringify(fields), 'str');
 }
 
-async function cardContentSetAxis(leaves, axis, value) {
-  const leaf = cardContentResolve(leaves, axis, value);
-  const store = getCfgStore();
-  await store.set('CREATION_MODE', leaf.creation_mode, 'str');
-  if (leaf.stored_card_type != null) await store.set('CARD_TYPE', leaf.stored_card_type, 'str');
+function fieldSummary(key) {
+  const options = getOptions();
+  const f = loadCardFields().find((x) => x.field === key);
+  if (!f.enabled) return 'off';
+  return `${f.position} · #${f.order} · ${options.interaction_labels[f.interaction]}`;
 }
 
-function cardContentItem(leaves, labels, label, axis) {
+function fieldSubPicker(label, fieldKey, attr, opts) {
   return {
     kind: 'picker',
     label,
-    options: () => cardContentAxisOptions(leaves, labels, axis, cardContentCurrentLeaf(leaves)),
-    getValue: () => cardContentCurrentLeaf(leaves)[axis],
-    setValue: (v) => cardContentSetAxis(leaves, axis, v),
+    options: opts,
+    getValue: () => loadCardFields().find((f) => f.field === fieldKey)[attr],
+    setValue: async (v) => {
+      const fields = loadCardFields();
+      for (const f of fields) if (f.field === fieldKey) f[attr] = v;
+      await saveCardFields(fields);
+    },
   };
 }
 
-function cardContentHint() {
-  const options = getOptions();
-  const leaf = cardContentCurrentLeaf(options.card_content_leaves);
-  return `${options.card_content_labels.front[leaf.front]} -> ${options.card_content_labels.back[leaf.back]}`;
+function fieldEnabledToggle(fieldKey) {
+  return {
+    kind: 'toggle',
+    label: 'Enabled',
+    getValue: () => loadCardFields().find((f) => f.field === fieldKey).enabled,
+    setValue: async (v) => {
+      const fields = loadCardFields();
+      for (const f of fields) if (f.field === fieldKey) f.enabled = Boolean(v);
+      await saveCardFields(fields);
+    },
+  };
 }
 
-async function cardContentMenu(crumbs) {
+function fieldOrderNumber(fieldKey) {
+  return {
+    kind: 'number',
+    label: 'Order',
+    minVal: 0,
+    step: 1,
+    isFloat: false,
+    getValue: () => loadCardFields().find((f) => f.field === fieldKey).order,
+    setValue: async (v) => {
+      const fields = loadCardFields();
+      for (const f of fields) if (f.field === fieldKey) f.order = Math.max(0, Math.round(Number(v)));
+      await saveCardFields(fields);
+    },
+  };
+}
+
+async function fieldDetailMenu(crumbs, catalogEntry) {
   const options = getOptions();
-  const leaves = options.card_content_leaves;
-  const labels = options.card_content_labels;
-  const trail = [...crumbs, 'Card content'];
+  const trail = [...crumbs, catalogEntry.label];
+  const items = [];
+  if (catalogEntry.key !== 'word') items.push(fieldEnabledToggle(catalogEntry.key));
+  items.push(
+    fieldSubPicker('Position', catalogEntry.key, 'position', POSITION_OPTIONS),
+    fieldOrderNumber(catalogEntry.key),
+  );
+  if (catalogEntry.interactions_allowed.length > 1) {
+    items.push(fieldSubPicker('Interaction', catalogEntry.key, 'interaction',
+      catalogEntry.interactions_allowed.map((i) => [i, options.interaction_labels[i]])));
+  }
+  items.push(separatorItem(), backItem());
+  await runScreen({ title: catalogEntry.label, breadcrumb: trail, summary: bannerSummary(), items });
+}
+
+// Returns true if the user chose "Continue -> Generate", false if they
+// backed/cancelled out.
+async function cardFieldsMenu(crumbs) {
+  const options = getOptions();
+  const trail = [...crumbs, 'Choose Card Fields'];
   const items = [
-    cardContentItem(leaves, labels, 'Content', 'content'),
-    cardContentItem(leaves, labels, 'Front', 'front'),
-    cardContentItem(leaves, labels, 'Back', 'back'),
-    cardContentItem(leaves, labels, 'Card type', 'card_type'),
+    ...options.field_catalog.map((c) => actionItem(c.label, `field:${c.key}`, () => fieldSummary(c.key))),
     separatorItem(),
-    pickerItem('Field verbosity', 'CREATION_MODE_VERBOSITY', options.creation_mode_verbosity_options),
-    separatorItem(),
-    backItem(),
+    actionItem('Continue -> Generate', 'continue', 'Proceed with this field configuration'),
+    backItem('Cancel'),
   ];
-  await runScreen({ title: 'Card Content', breadcrumb: trail, summary: bannerSummary(), items });
+  while (true) {
+    const choice = await runScreen({ title: 'Choose Card Fields', breadcrumb: trail, summary: bannerSummary(), items });
+    if (choice === undefined || choice === 'back') return false;
+    if (choice === 'continue') return true;
+    const key = choice.split(':')[1];
+    const entry = options.field_catalog.find((c) => c.key === key);
+    await fieldDetailMenu(crumbs, entry);
+  }
 }
 
 function pocketTtsVoiceOptions(langCode) {
@@ -379,6 +429,8 @@ async function settingsGif(crumbs) {
     toggleItem('Enable GIF (Giphy)', 'ENABLE_GIF'),
     pickerItem('Content rating filter', 'GIF_RATING', options.gif_ratings),
     separatorItem(),
+    textItem('Giphy API key', 'GIPHY_API_KEY', { secret: true }),
+    separatorItem(),
     backItem(),
   ];
   await runScreen({ title: 'GIF Settings', breadcrumb: trail, summary: bannerSummary(), items });
@@ -401,7 +453,9 @@ async function settingsRateLimits(crumbs) {
   });
 }
 
-async function settingsMain(crumbs) {
+// mode: the active WORD_SOURCE value — threaded through to
+// settingsGeneration() only, mirroring main.py's configure_main(mode).
+async function settingsMain(crumbs, mode) {
   const trail = [...crumbs, 'Settings'];
   while (true) {
     const items = [
@@ -414,16 +468,15 @@ async function settingsMain(crumbs) {
         const label = getOptions().provider_labels[c.AI_PROVIDER] || c.AI_PROVIDER;
         return label + (aiKeyMissing() ? '  ! key missing' : '');
       }),
-      actionItem('Card content', 'cardcontent', cardContentHint),
       actionItem('Deck & cards', 'deck', () => getCfgStore().get().CARD_TEMPLATE),
       actionItem('Generation', 'generation', () => {
         const c = getCfgStore().get();
-        return `${c.WORDS_PER_RUN}/run   pool ${c.TOTAL_WORD_POOL}   meanings: ${c.MEANING_EXHAUSTIVENESS}`;
+        return `${c.WORDS_PER_RUN}/run   pool ${c.TOTAL_WORD_POOL}`;
       }),
       actionItem('Audio', 'audio', () => (getCfgStore().get().ENABLE_AUDIO ? 'ON' : 'OFF')),
       actionItem('GIF', 'gif', () => {
         const c = getCfgStore().get();
-        return `${c.ENABLE_GIF ? 'ON' : 'OFF'}  |  rating: ${c.GIF_RATING}`;
+        return `${c.ENABLE_GIF ? 'ON' : 'OFF'}  |  rating: ${c.GIF_RATING}` + (giphyKeyMissing() ? '  ! key missing' : '');
       }),
       actionItem('Rate limits', 'ratelimits', () => {
         const c = getCfgStore().get();
@@ -436,9 +489,8 @@ async function settingsMain(crumbs) {
     if (choice === undefined || choice === 'back') return;
     if (choice === 'language') await settingsLanguage(trail);
     else if (choice === 'ai') await settingsAi(trail);
-    else if (choice === 'cardcontent') await cardContentMenu(trail);
     else if (choice === 'deck') await settingsDeck(trail);
-    else if (choice === 'generation') await settingsGeneration(trail);
+    else if (choice === 'generation') await settingsGeneration(trail, mode);
     else if (choice === 'audio') await settingsAudio(trail);
     else if (choice === 'gif') await settingsGif(trail);
     else if (choice === 'ratelimits') await settingsRateLimits(trail);
@@ -466,6 +518,16 @@ async function showStatistics(crumbs) {
     }
   }
 
+  if (stats.by_category.length) {
+    body.push('', styles.bold.render('By Category (subdecks):'));
+    for (const { category, count } of stats.by_category) {
+      const bar = '█'.repeat(Math.min(count, 28));
+      body.push(
+        `  ${(category + ':').padEnd(24)} ${styles.warning.render(String(count).padStart(4))}  ${styles.accent.render(bar)}`,
+      );
+    }
+  }
+
   if (stats.recent_days.length) {
     body.push('', styles.bold.render('Cards added (last 7 sessions):'));
     for (const { date, count } of stats.recent_days) {
@@ -485,102 +547,115 @@ async function showStatistics(crumbs) {
   await staticScreen({ title: 'Statistics', breadcrumb: trail, summary: bannerSummary(), body });
 }
 
-const CARD_TYPE_INFO = [
-  [
-    'Basic',
-    [
-      'The classic format. Front shows the word, IPA,',
-      'GIF and example sentence. Back reveals the meaning.',
-      'Best for recognition practice.',
-    ],
-  ],
-  [
-    'Basic + Reversed',
-    [
-      'Creates 2 Anki cards per note. Card 1 is the usual',
-      'word->meaning. Card 2 flips it: you see the English',
-      'definition and must recall the foreign word.',
-    ],
-  ],
-  [
-    'Type in Answer',
-    [
-      'Front shows the meaning and the example in your native',
-      'language. You TYPE the foreign word. Anki checks your',
-      'spelling and highlights any mistakes.',
-    ],
-  ],
-  [
-    'Cloze',
-    [
-      'The example sentence is shown with the target word',
-      'blanked out: "Elle est tres ___."  You fill the gap.',
-      'Great for learning words in context.',
-    ],
-  ],
-];
+// ── Mode selection: the outermost screen (Annotation vs Spontaneous) ───
+// Session-only by design (confirmed with the user) — picking a mode here
+// never calls bridge.setConfig, so config.py's WORD_SOURCE is never
+// rewritten just from selecting it. getCfgStore().setLocal() mutates only
+// the in-process config cache so the rest of this session's screens (and
+// bannerSummary()) see the right value; bridge.generate(mode) carries it
+// across the subprocess boundary explicitly for the one call that
+// actually needs it in Python (see bridge.mjs).
 
-async function showCardTypeGuide(crumbs) {
-  const trail = [...crumbs, 'Card type guide'];
-  const body = [];
-  CARD_TYPE_INFO.forEach(([title, lines], i) => {
-    if (i > 0) body.push('');
-    body.push(styles.warningBold.render(`[${i + 1}] ${title}`));
-    for (const line of lines) body.push(styles.muted.render('    ' + line));
-  });
-  await staticScreen({ title: 'Card Types — How They Work', breadcrumb: trail, summary: bannerSummary(), body });
+const MODE_LABELS = {
+  markdown_notes: 'Annotation Mode',
+  frequency_list: 'Spontaneous Mode (AI)',
+};
+
+async function pickCreationMode() {
+  const trail = ['Choose Creation Mode'];
+  const items = [
+    actionItem('Annotation Mode', 'markdown_notes', 'Generate cards from words/phrases highlighted in your notes'),
+    actionItem('Spontaneous Mode (AI)', 'frequency_list', 'AI picks words and invents example content automatically'),
+    separatorItem(),
+    backItem('Exit'),
+  ];
+  const choice = await runScreen({ title: 'Choose Creation Mode', breadcrumb: trail, summary: bannerSummary(), items });
+  return (choice === undefined || choice === 'back') ? null : choice;
 }
 
-// ── Export flow: JS-native card-type picker, then delegate to Python ───
+// ── Generate wizard: field checklist -> generate (+ auto-export). Mode is
+// no longer picked here — it's the outer screen this lives under.
+
+async function runGenerateWizard(crumbs) {
+  const proceed = await cardFieldsMenu(crumbs);
+  if (!proceed) return;
+  const mode = getCfgStore().get().WORD_SOURCE;
+  runSubprocess(() => bridge.generate(mode));   // _do_generate() now auto-exports at the end
+}
+
+// ── Export flow: show recent export history, prompt for an output
+// filename, then delegate to Python ─────────────────────────────────────
 
 async function runExportFlow(crumbs) {
   const trail = [...crumbs, 'Export decks'];
   const cfg = getCfgStore().get();
-  const choices = [
-    ['basic', 'Basic', 'Word -> Meaning  |  Classic recognition card'],
-    ['basic_reversed', 'Basic + Reversed', 'Word <-> Meaning  |  2 cards per note (recognition + recall)'],
-    ['type_answer', 'Type in Answer', 'Definition shown -> user types the word'],
-    ['cloze', 'Cloze', 'Fill in the blank in the example sentence'],
-    [null, 'Use config.py default', `Current value: ${cfg.CARD_TYPE}`],
-  ];
-
-  const items = [
-    ...choices.map(([, label, desc], i) => actionItem(label, `type:${i}`, desc)),
+  const stats = bridge.stats();
+  let filename = cfg.DECK_OUTPUT_FULL;
+  const filenameItem = {
+    kind: 'text',
+    label: 'Output filename',
+    secret: false,
+    getValue: () => filename,
+    setValue: (v) => { filename = v || cfg.DECK_OUTPUT_FULL; },
+  };
+  const items = [];
+  if (stats.recent_exports.length) {
+    items.push(infoItem('Recent exports:'));
+    for (const { date, type, count } of stats.recent_exports) {
+      items.push(infoItem(`  ${date.slice(0, 16)}  ${String(type).padEnd(22)}  ${count} cards`));
+    }
+    items.push(separatorItem());
+  }
+  items.push(
+    filenameItem,
     separatorItem(),
+    actionItem('Export', 'confirm', 'Write one full-backup .apkg under this filename'),
     backItem('Cancel'),
-  ];
+  );
 
-  const choice = await runScreen({ title: 'Select Card Type for Export', breadcrumb: trail, summary: bannerSummary(), items });
+  const choice = await runScreen({ title: 'Export Decks', breadcrumb: trail, summary: bannerSummary(), items });
   if (choice === undefined || choice === 'back') return;
 
-  const cardType = choices[Number(choice.split(':')[1])][0];
-  runSubprocess(() => bridge.export(cardType || undefined));
+  runSubprocess(() => bridge.export(filename));
 }
 
-// ── Main menu ────────────────────────────────────────────────────────
+// ── Mode-scoped Main Menu — 'Exit' here backs out to mode selection, not
+// the app; mainMenu()'s outer loop is what actually quits. ─────────────
 
-export async function mainMenu() {
-  setAppVersion(getOptions().app_version);
-  const crumbs = ['Main Menu'];
+async function modeMainMenu(mode) {
+  const label = MODE_LABELS[mode] || mode;
+  const crumbs = [`Main Menu — ${label}`];
   while (true) {
     const items = [
-      actionItem('Generate new cards', 'generate', () => `Up to ${getCfgStore().get().WORDS_PER_RUN} words from the frequency list`),
-      actionItem('Export decks', 'export', 'Build .apkg  —  choose card type before exporting'),
+      actionItem('Generate new cards', 'generate', 'Choose fields, then generate + export automatically'),
+      actionItem('Export decks', 'export', 'Rebuild a full backup .apkg under a chosen filename'),
       actionItem('Configure', 'configure', () => {
         const c = getCfgStore().get();
-        return `${String(c.SOURCE_LANG).toUpperCase()} -> ${c.TARGET_LANG}`;
+        const warnings = getConfigWarnings();
+        return `${String(c.SOURCE_LANG).toUpperCase()} -> ${c.TARGET_LANG}` + (warnings.length ? `   ⚠ ${warnings.length}` : '');
       }),
       actionItem('Statistics', 'stats', 'Card counts, POS breakdown, export history'),
-      actionItem('Card type guide', 'guide', 'Basic / Reversed / Type / Cloze'),
       separatorItem(),
       backItem('Exit'),
     ];
-    const choice = await runScreen({ title: 'Main Menu', breadcrumb: crumbs, summary: bannerSummary(), items });
-    if (choice === undefined || choice === 'back') break;
-    if (choice === 'generate') runSubprocess(() => bridge.generate());
+    const choice = await runScreen({ title: `Main Menu — ${label}`, breadcrumb: crumbs, summary: bannerSummary(), items });
+    if (choice === undefined || choice === 'back') return;
+    if (choice === 'generate') await runGenerateWizard(crumbs);
     else if (choice === 'export') await runExportFlow(crumbs);
-    else if (choice === 'configure') await settingsMain(crumbs);
+    else if (choice === 'configure') await settingsMain(crumbs, mode);
     else if (choice === 'stats') await showStatistics(crumbs);
-    else if (choice === 'guide') await showCardTypeGuide(crumbs);
   }
 }
+
+// ── App entry point: mode selection loop ────────────────────────────────
+
+export async function mainMenu() {
+  setAppVersion(getOptions().app_version);
+  while (true) {
+    const mode = await pickCreationMode();
+    if (!mode) break;
+    getCfgStore().setLocal('WORD_SOURCE', mode);
+    await modeMainMenu(mode);
+  }
+}
+

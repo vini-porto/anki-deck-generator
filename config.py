@@ -104,12 +104,15 @@ MEANING_EXHAUSTIVENESS = "important"   # "essential" | "important" | "all"
 
 # ─────────────────────────────────────────────────────────────
 #  WORD SOURCE
-#  Where candidate words come from.
+#  Where candidate words come from — set via Main Menu -> Generate new
+#  cards' first step ("Spontaneous Mode (AI)" / "Annotation Mode"), not
+#  meant to be hand-edited here.
 #    "frequency_list" — top TOTAL_WORD_POOL most-frequent SOURCE_LANG
-#                        words, via wordfreq (default)
+#                        words, via wordfreq (Spontaneous Mode, default)
 #    "markdown_notes"  — scan MARKDOWN_NOTES_PATH for *.md files (e.g. an
 #                        Obsidian vault) and build the pool from those
-#                        instead. TOTAL_WORD_POOL still caps the result.
+#                        instead (Annotation Mode). TOTAL_WORD_POOL still
+#                        caps the result.
 #  MARKDOWN_SOURCE_MODE (only used when WORD_SOURCE = "markdown_notes"):
 #    "folder" — recursively scan MARKDOWN_NOTES_PATH for every *.md file
 #               underneath it (default)
@@ -143,47 +146,17 @@ CARD_TEMPLATE = "dark"
 
 
 # ─────────────────────────────────────────────────────────────
-#  CARD TYPE
-#  Controls the Anki note type used when exporting .apkg files.
-#  This is independent of CARD_TEMPLATE (which controls styling).
-#
-#    "basic"          — classic word-to-meaning card (default)
-#    "basic_reversed" — 2 cards per note: word→meaning + meaning→word
-#    "type_answer"    — front shows the definition; user types the word
-#    "cloze"          — fill-in-the-blank using example sentences
+#  CARD FIELDS
+#  Which fields appear on the card, and how — set via Generate new cards'
+#  field checklist (Main Menu -> Generate new cards -> pick a mode ->
+#  choose fields), not meant to be hand-edited here. A JSON array, one
+#  entry per field: {"field", "enabled", "position" ("front"/"back"),
+#  "order" (sort key within that side), "interaction"
+#  ("reveal"/"type_in"/"cloze" — "cloze" only valid for
+#  text_example_phrase)}. See CLAUDE.md § Card fields.
 # ─────────────────────────────────────────────────────────────
 
-CARD_TYPE = "basic"
-
-
-# ─────────────────────────────────────────────────────────────
-#  CREATION MODE
-#  Controls WHAT the AI is asked to generate and what serves as the Anki
-#  card's Front (stimulus) vs Back (answer). Independent of CARD_TEMPLATE
-#  (visual styling). CARD_TYPE (note mechanics: basic/basic_reversed/
-#  type_answer/cloze) only applies when CREATION_MODE = "word_meaning" —
-#  every other mode ships its own single fixed note shape (own Anki note
-#  type), and the CARD_TYPE picker has no effect while a different mode
-#  is active.
-#
-#    "word_meaning"          — classic word -> meaning/definition (default)
-#    "phrase_context"        — a natural phrase using the word; recall its
-#                               meaning from context (word highlighted on front)
-#    "audio_meaning"         — hear the word; recall its meaning
-#    "audio_writing"         — hear the word; reveal its written form/spelling
-#    "audio_typing"          — hear the word; type what you heard (auto-checked)
-#    "phrase_native_writing" — a phrase in your native language on the front;
-#                               its correct written translation on the back
-# ─────────────────────────────────────────────────────────────
-
-CREATION_MODE = "word_meaning"
-
-# CREATION_MODE_VERBOSITY only affects the 4 audio/production modes above
-# (audio_meaning, audio_writing, audio_typing, phrase_native_writing) —
-# word_meaning and phrase_context are unaffected and always show every field.
-#    "complete" — every applicable field is filled in (default)
-#    "simple"   — only the essential field(s) for that mode
-CREATION_MODE_VERBOSITY = "complete"
+CARD_FIELDS_JSON = '[{"field": "word", "enabled": true, "position": "front", "order": 0, "interaction": "reveal"}, {"field": "gender", "enabled": true, "position": "front", "order": 1, "interaction": "reveal"}, {"field": "ipa", "enabled": true, "position": "front", "order": 2, "interaction": "reveal"}, {"field": "audio_word", "enabled": true, "position": "front", "order": 3, "interaction": "reveal"}, {"field": "image", "enabled": true, "position": "front", "order": 4, "interaction": "reveal"}, {"field": "text_example_phrase", "enabled": true, "position": "front", "order": 5, "interaction": "reveal"}, {"field": "text_example_translation", "enabled": true, "position": "front", "order": 6, "interaction": "reveal"}, {"field": "audio_example", "enabled": true, "position": "front", "order": 7, "interaction": "reveal"}, {"field": "text_meaning", "enabled": true, "position": "back", "order": 0, "interaction": "reveal"}, {"field": "audio_meaning", "enabled": true, "position": "back", "order": 1, "interaction": "reveal"}, {"field": "synonyms", "enabled": true, "position": "back", "order": 2, "interaction": "reveal"}]'
 
 
 # ─────────────────────────────────────────────────────────────
