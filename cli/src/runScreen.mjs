@@ -7,8 +7,26 @@ import { nextKeyBatch, isExitCombo, clearScreen } from './term.mjs';
 import { buildHeader, buildFooter, buildRow, buildEditBox, frame, resolveOptions } from './render.mjs';
 import { styles } from './theme.mjs';
 
+function isSelectable(item) {
+  return item.kind !== 'separator' && item.kind !== 'info';
+}
+
+// One legend entry per focused row's kind, replacing the per-row inline
+// hints render.mjs's computeRow() used to append to toggle/picker/number/
+// text rows (Space/Enter to toggle, ← → cycle, etc.) — mirrors tui.py's
+// _STATUSBAR_HINTS. action/back get their own entries too, closing a gap
+// the old static footer never covered.
+const KIND_HINTS = {
+  action: 'Enter Open',
+  back: 'Enter Back',
+  toggle: 'Space/Enter Toggle',
+  picker: '←→ Cycle',
+  number: '←→ Adjust · Enter Type',
+  text: 'Enter Edit',
+};
+
 function firstSelectable(items) {
-  const i = items.findIndex((it) => it.kind !== 'separator');
+  const i = items.findIndex(isSelectable);
   return i === -1 ? 0 : i;
 }
 
@@ -16,7 +34,7 @@ function nextSelectable(items, current, direction) {
   const n = items.length;
   let idx = (((current + direction) % n) + n) % n;
   for (let i = 0; i < n; i++) {
-    if (items[idx].kind !== 'separator') return idx;
+    if (isSelectable(items[idx])) return idx;
     idx = (((idx + direction) % n) + n) % n;
   }
   return current;
@@ -37,10 +55,14 @@ export async function runScreen({ title, breadcrumb = [], summary = '', items })
     if (editing) {
       lines.push('', buildEditBox(items[focused].label, editBuffer.join(''), editCursor, items[focused].secret));
     }
-    lines.push(
-      '',
-      buildFooter(editing ? ['Enter confirm', 'Esc cancel'] : ['↑↓ Navigate', 'Enter Select', '←→ Adjust', 'Esc Back']),
-    );
+    let hints;
+    if (editing) {
+      hints = ['Enter confirm', 'Esc cancel'];
+    } else {
+      const kindHint = KIND_HINTS[items[focused]?.kind];
+      hints = ['↑↓ Navigate', ...(kindHint ? [kindHint] : []), 'Esc Back'];
+    }
+    lines.push('', buildFooter(hints));
     process.stdout.write(frame(lines));
   }
 

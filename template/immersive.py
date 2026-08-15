@@ -1,9 +1,8 @@
 # =============================================================
 #  templates/immersive.py
-#  Immersive template — GIF as full card background with
-#  text overlay. High visual impact, great for concrete words.
-#  Fields shown: Word, Gender, IPA, GIF (background), Example,
-#                Translation, Meaning, Synonyms, all audio
+#  Immersive template — high-contrast dark styling with a large,
+#  framed GIF. Field visibility/position/order is entirely
+#  user-controlled (see Card fields checklist).
 # =============================================================
 
 NAME = "immersive"
@@ -15,35 +14,24 @@ CSS = """
     background-color: #0f0f0f;
     color: #f0f0f0;
     text-align: center;
-    padding: 0;
+    padding: 20px 20px 24px;
     line-height: 1.65;
     font-size: 17px;
 }
 
-/* ── GIF hero background ── */
+/* ── GIF, large framed treatment ── */
 .gif-hero {
-    position: relative;
     width: 100%;
-    min-height: 220px;
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
-    overflow: hidden;
-    border-radius: 0 0 16px 16px;
+    margin: 0 -20px;
+    padding: 0 20px 4px;
 }
 .gif-hero img {
-    position: absolute;
-    top: 0; left: 0;
-    width: 100%; height: 100%;
-    object-fit: cover;
-    filter: brightness(0.45);
-    border-radius: 0 0 16px 16px;
-}
-.gif-hero-content {
-    position: relative;
-    z-index: 2;
-    padding: 20px 20px 24px;
     width: 100%;
+    max-width: 100% !important;
+    max-height: 260px !important;
+    object-fit: cover;
+    border-radius: 16px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
 }
 
 /* ── Word ── */
@@ -76,11 +64,6 @@ CSS = """
 }
 .gender-m { background: rgba(37,99,235,0.5); color: #bfdbfe; border: 1px solid #60a5fa55; }
 .gender-f { background: rgba(157,23,77,0.5);  color: #fbcfe8; border: 1px solid #f472b655; }
-
-/* ── Body content below GIF ── */
-.card-body {
-    padding: 20px 20px 24px;
-}
 
 /* ── Example sentence ── */
 .example {
@@ -141,47 +124,26 @@ hr { border: none; border-top: 1px solid #1e293b; margin: 14px 0; }
 }
 """
 
-# GIF used as hero background via inline style trick
-FRONT = """
-<div class="gif-hero">
-    <div id="gif-bg"></div>
-    <div class="gif-hero-content">
-        <div class="word">{{Word}}</div>
-        {{Gender}}
-        <div class="ipa">/ {{IPA}} /</div>
-        {{Sound_Word}}
-    </div>
-</div>
-<div class="card-body">
-    <div class="example">{{Text_Example_Phrase}}</div>
-    <div class="example-translation">{{Text_Example_Translation}}</div>
-    {{Sound_Example}}
-</div>
-<script>
-(function() {
-    var gifField = {{Image_Raw}};
-    var hero = document.querySelector('.gif-hero');
-    if (gifField && hero) {
-        var img = document.createElement('img');
-        img.src = gifField;
-        hero.insertBefore(img, hero.firstChild);
-    }
-})();
-</script>
-"""
-
-# Immersive back is simpler — meaning + synonyms below the front
-BACK = """
-{{FrontSide}}
-<div class="card-body">
-    <hr>
-    <div class="meaning">{{Text_Meaning}}</div>
-    {{Sound_Meaning}}
-    {{Synonyms}}
-</div>
-"""
-
-# Note: the immersive template requires an extra field "Image_Raw"
-# that stores just the GIF URL (not the full <img> tag).
-# The main script handles this automatically when this template is active.
-REQUIRES_RAW_IMAGE = True
+# Per-field HTML fragments, assembled dynamically at export time by
+# _assemble_side() (main.py) — see CLAUDE.md § Card fields / template/dark.py.
+# Earlier versions of this template used a JS-injected full-bleed
+# background image (a separate "Image_Raw" field + a <script> that swapped
+# it in) — dropped once field position/order became user-configurable,
+# since a Model's declared field set must stay identical across every
+# interaction (reveal/type_in/cloze) a user might pick, and a hero
+# background sized for one fixed layout doesn't compose with that. The
+# large framed .gif-hero image (below) keeps a distinct, high-visual-impact
+# look using the same plain {{Image}} field every other template uses.
+FIELD_HTML = {
+    "word":                     '{{#Word}}<div class="word">{{Word}}</div>{{/Word}}',
+    "gender":                   '{{Gender}}',
+    "ipa":                      '{{#IPA}}<div class="ipa">/ {{IPA}} /</div>{{/IPA}}',
+    "audio_word":               '{{Sound_Word}}',
+    "image":                    '{{#Image}}<div class="gif-hero">{{Image}}</div>{{/Image}}',
+    "text_example_phrase":      '{{#Text_Example_Phrase}}<div class="example">{{Text_Example_Phrase}}</div>{{/Text_Example_Phrase}}',
+    "text_example_translation": '{{#Text_Example_Translation}}<div class="example-translation">{{Text_Example_Translation}}</div>{{/Text_Example_Translation}}',
+    "audio_example":            '{{Sound_Example}}',
+    "text_meaning":             '{{#Text_Meaning}}<div class="meaning">{{Text_Meaning}}</div>{{/Text_Meaning}}',
+    "audio_meaning":            '{{Sound_Meaning}}',
+    "synonyms":                 '{{Synonyms}}',
+}

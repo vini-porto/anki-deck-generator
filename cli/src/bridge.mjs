@@ -60,6 +60,15 @@ export const bridge = {
 
   // Inherits stdio so Python's own colored progress output prints directly
   // into this same terminal (mirrors tui.py's Action(print_mode=True)).
-  generate: () => runInherited(['--generate']),
-  export: (cardType) => runInherited(cardType ? [`--export=${cardType}`] : ['--export']),
+  // generate() auto-exports at the end (see main.py's _do_generate()).
+  // wordSource carries the session-only mode choice (Annotation/
+  // Spontaneous) into the subprocess as a one-off in-memory override —
+  // config.py is never rewritten just from picking a mode (see
+  // screens.mjs's pickCreationMode()/mainMenu() and main.py's
+  // _run_cli_bridge()'s matching --word-source handling).
+  // export(filename) writes a single full-backup .apkg under that name;
+  // omitting filename is only used internally by _run_cli_bridge's own
+  // default-name new+full pair, never called that way from the JS side.
+  generate: (wordSource) => runInherited(wordSource ? ['--generate', `--word-source=${wordSource}`] : ['--generate']),
+  export: (filename) => runInherited(filename ? [`--export=${filename}`] : ['--export']),
 };

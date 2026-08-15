@@ -8,7 +8,7 @@
             AI-powered Anki flashcard deck generator
 ```
 
-[![Version](https://img.shields.io/badge/version-2.5.0-blueviolet?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.6.0-blueviolet?style=flat-square)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![AI](https://img.shields.io/badge/AI-Groq%20%7C%20OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama-orange?style=flat-square)](https://console.groq.com)
@@ -17,7 +17,7 @@
 
 **AI-generated flashcards for any language** · example sentences · IPA · audio · animated GIFs · synonyms · gender · POS tags · interactive terminal UI
 
-[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Types](#card-types) · [Templates](#card-templates) · [Categories & Subdecks](#categories--subdecks) · [Local TTS](#local-tts-pocket-tts) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Roadmap](#roadmap)
+[Quick Start](#quick-start) · [Interactive Menu](#interactive-menu) · [Card Fields](#card-fields) · [Templates](#card-templates) · [Categories & Subdecks](#categories--subdecks) · [Local TTS](#local-tts-pocket-tts) · [Configuration](#configuration-reference) · [Daily Workflow](#daily-workflow) · [Roadmap](#roadmap)
 
 ---
 
@@ -95,7 +95,9 @@ The interactive menu opens. Go to **Configure → AI & API keys** to pick your p
 ### 6. Generate cards and import into Anki
 
 1. Select **Generate new cards** from the main menu.
-2. When done, select **Export decks** and choose a card type.
+2. Pick a mode (Annotation or Spontaneous), choose which fields you want on
+   the card, then let it run — cards are generated and exported
+   automatically, no extra steps.
 3. Import `deck_new.apkg` into Anki.
 
 **Always import `deck_new.apkg`** — it contains only new cards and never overwrites your manual edits inside Anki.
@@ -104,19 +106,62 @@ The interactive menu opens. Go to **Configure → AI & API keys** to pick your p
 
 ## Interactive menu
 
-Run `python main.py` to open the arrow-key driven interface:
+Run `python main.py` to open the arrow-key driven interface. **The first
+thing you see is the mode picker** — everything else (Generate, Export,
+Configure, Statistics) lives underneath whichever mode you pick, since
+what those screens show depends on it:
 
 ```
-  Main Menu
+  Choose Creation Mode
   ─────────────────────────────────────────────
-  ▶ Generate new cards        Up to 50 words from the frequency list
-    Export decks               Build .apkg  —  choose card type before exporting
-    Configure                  FR -> English
-    Statistics                 Card counts, POS breakdown, export history
-    Card type guide            Basic / Reversed / Type / Cloze
+  ▶ Annotation Mode           Generate cards from words/phrases highlighted in your notes
+    Spontaneous Mode (AI)     AI picks words and invents example content automatically
     ─────────────────────────────────────────────
     ← Exit
 ```
+
+Picking one takes you into that mode's own Main Menu:
+
+```
+  Main Menu — Annotation Mode
+  ─────────────────────────────────────────────
+  ▶ Generate new cards        Choose fields, then generate + export automatically
+    Export decks               Recent exports, then a filename prompt
+    Configure                  FR -> English
+    Statistics                 Card counts, POS breakdown, export history
+    ─────────────────────────────────────────────
+    ← Exit
+```
+
+**"Exit" here goes back to the mode picker, not out of the app** — you can
+switch between Annotation and Spontaneous mode freely without restarting.
+To actually quit, exit from the mode picker itself (or `Ctrl+C` anywhere).
+Picking a mode never changes anything in `config.py` — it's a per-session
+choice, so re-running the app always starts fresh at the mode picker.
+
+Selecting **Generate new cards** goes straight to the field checklist
+(mode's already chosen):
+
+```
+  Choose Card Fields
+  ─────────────────────────────────────────────
+  ▶ Word                      front · #0 · Reveal
+    Gender                    front · #1 · Reveal
+    IPA                       front · #2 · Reveal
+    ...
+    ─────────────────────────────────────────────
+    Continue -> Generate
+```
+
+Each field opens its own detail screen (Enabled / Position / Order /
+Interaction — reveal, type-the-answer, or cloze-deletion for the example
+phrase). Once you continue, generation runs and both `.apkg` files are
+written automatically — no separate export step.
+
+Note that **Configure → Generation** also adapts to the active mode — in
+Annotation Mode it shows the Markdown notes settings; in Spontaneous Mode
+it shows Meaning exhaustiveness instead, since only one of those is ever
+relevant at a time.
 
 **Controls:**
 
@@ -137,7 +182,7 @@ All settings can be changed without touching any file:
   ──────────────────────────────────────────
     Language          FR -> English
     AI & API keys     Groq
-    Deck & cards      dark  |  basic
+    Deck & cards      dark
     Generation        50/run   pool 2000
     Audio             ON
     GIF               ON  |  rating: g
@@ -149,8 +194,8 @@ All settings can be changed without touching any file:
 ## JavaScript TUI
 
 A second, JS-based interactive menu lives in `cli/` — same screens as the
-Python curses menu above (Generate, Export, Configure, Statistics, Card type
-guide), styled with [Lip Gloss](https://github.com/charmbracelet/lipgloss)
+Python curses menu above (Generate, Export, Configure, Statistics),
+styled with [Lip Gloss](https://github.com/charmbracelet/lipgloss)
 (via `@charmland/lipgloss`, Charm's own WASM build of the real Go library)
 for a modern look inspired by Lip Gloss's own showcase demo: a solid violet
 title banner in bold white text, breadcrumb navigation on a dark status bar,
@@ -172,74 +217,59 @@ back).
 
 ---
 
-## Card types
+## Card fields
 
-Choose the Anki note type when exporting. The card type can be changed per-export from the Export menu, or set as the default in Configure → Deck & cards.
+Instead of picking a card type or a named "creation mode," you build the
+card directly: check which fields you want, and for each one set where it
+goes (front or back), what order it appears in relative to the other
+fields on that side, and how it behaves. This is what **Generate new
+cards** takes you straight to, once you're inside a mode (see [Annotation
+vs. Spontaneous Mode](#word-sources) below) — there's no separate settings
+screen for it, since which fields can be AI-filled depends on the active
+mode.
 
-| Type | Description |
+| Field | What it is |
 |---|---|
-| **Basic** | Word on front, meaning on back. Classic recognition practice. |
-| **Basic + Reversed** | Two cards per note — word→meaning and meaning→word. |
-| **Type in Answer** | Definition shown; you type the foreign word. Anki checks your spelling. |
-| **Cloze** | Example sentence with the target word blanked out. Fill in the gap. |
+| Word | The word or phrase itself (always on) |
+| IPA | Phonetic transcription |
+| Gender | ♂/♀ badge (nouns only) |
+| Image | An animated GIF matched to the example |
+| Meaning | Dictionary-style definition in your native language |
+| Example phrase | A natural sentence using the word |
+| Example translation | Translation of the example sentence |
+| Synonyms | Up to 6 related words as badges |
+| Word audio / Meaning audio / Example audio | Pronunciation for each of the above |
 
----
+For each enabled field you also choose an **interaction**:
 
-## Creation modes
+- **Reveal** (default) — shown passively on whichever side you placed it.
+- **Type the answer** — Anki shows a typed-input box and checks what you
+  type against that field exactly. Available on Word and Example phrase.
+- **Cloze deletion** — blanks the word out inline within the example
+  sentence, fill-in-the-blank style. Available only on Example phrase, and
+  only one field can use it per configuration.
 
-Controls *what* the AI is asked to generate and what becomes the card's front
-(stimulus) vs. back (answer) — a third axis independent of card type
-(mechanics, above) and card template (visuals, below). Stored as
-`CREATION_MODE` (+ `CARD_TYPE` for the Word-based family) in config.py, but
-both interactive menus present it as one screen under
-**Configure → Card content** with 4 pickers instead of a flat list of named
-styles — pick **Content**, **Front**, **Back**, and **Card type** directly,
-and each picker's choices narrow to whatever combination makes sense given
-the ones before it:
-
-| Content | Front | Back | Card type |
-|---|---|---|---|
-| Word | The word (text) | Meaning | Basic / Basic + Reversed / Type in Answer / Cloze |
-| Word | The word's audio | Meaning | Basic |
-| Word | The word's audio | Word (spelling) | Basic / Type in Answer |
-| Phrase | A natural phrase, word highlighted (text) | Meaning + translation | Basic |
-| Phrase | The same phrase, audio only | Meaning + translation | Basic |
-| Phrase | The same phrase, audio only | Phrase (spelling) | Type in Answer |
-| Phrase | A phrase in your native language | Translation | Type in Answer |
-
-"Type in Answer" adds a typed input box to the Front that Anki auto-checks
-against the Back field letter-for-letter; "Basic" is a flip-and-self-grade
-card; "Basic + Reversed" builds two cards per note (Front→Back and
-Back→Front); "Cloze" blanks the anchor word out of the example sentence
-(Word content only — every Phrase combination has a single fixed Card type,
-since basic_reversed/cloze aren't built for phrase content). Every mode
-still centers on one anchor word, so part-of-speech tags and category
-subdecks keep working the same way no matter which combination generated
-the card.
-
-Every combination except the first row (Word/text/Meaning, i.e. `CARD_TYPE`'s
-basic/basic_reversed/type_answer/cloze variants) also respects
-`CREATION_MODE_VERBOSITY` (Configure → Card content):
-
-- **Complete** (default) — every applicable field is filled in (IPA,
-  gender, synonyms, and — where relevant — the full example/translation)
-- **Simple** — only the essential field(s) for that style, everything else
-  omitted (and, since the omitted text is never generated, no wasted TTS
-  calls for audio that would never be shown)
+There's no more "Basic + Reversed" (auto-generating a second, flipped
+card from the same note) — that specific style was dropped when this
+system replaced the old fixed card-type list; every other reveal/type/
+cloze combination you'd want is still buildable directly through the
+checklist.
 
 ---
 
 ## Word sources
 
-Controls *where candidate words come from* — independent of creation mode
-(above), which controls what happens to a word once it's picked. Set via
-`WORD_SOURCE` in config.py, or Configure → Generation in either interactive
-menu.
+Controls *where candidate words come from* — this is the mode picker
+you see first when you open the app ([above](#interactive-menu)), not a
+setting you edit in Configure. Picking a mode is per-session only and
+never rewrites `config.py`. For headless/cron runs (which skip the
+interactive menu entirely), set `WORD_SOURCE` directly in config.py
+instead.
 
-| Source | Behavior |
+| Mode | Behavior |
 |---|---|
-| **Frequency word list** (default) | Top `TOTAL_WORD_POOL` most-frequent words for `SOURCE_LANG`, via `wordfreq` |
-| **Markdown notes / Obsidian vault** | Reads `MARKDOWN_NOTES_PATH` and builds the pool from it instead — useful if you already keep reading/vocabulary notes in Obsidian or a similar app and want cards built from words you've actually encountered, not a generic corpus |
+| **Spontaneous Mode (AI)** (default) | Top `TOTAL_WORD_POOL` most-frequent words for `SOURCE_LANG`, via `wordfreq`, with the AI inventing every field's content from scratch |
+| **Annotation Mode** | Reads `MARKDOWN_NOTES_PATH` and builds the pool from your own notes instead — useful if you already keep reading/vocabulary notes in Obsidian or a similar app and want cards built from words you've actually encountered, not a generic corpus. The **Word** and **Example phrase** fields, when enabled, are taken directly from your note (the literal highlight, and the sentence it sits in) instead of being AI-generated — every other enabled field is still AI-generated, using that quoted sentence as context |
 
 `MARKDOWN_SOURCE_MODE` controls whether `MARKDOWN_NOTES_PATH` is a folder
 or a single file:
@@ -260,9 +290,9 @@ pulled out of your notes:
 
 `TOTAL_WORD_POOL` still caps the pool size in either mode.
 
-**Dedup works differently for markdown notes than for the frequency list.**
-The frequency list dedups globally by word: once a word has a card, it
-never comes up again. Markdown notes dedup **per file** instead — the same
+**Dedup works differently for Annotation Mode than for Spontaneous Mode.**
+Spontaneous Mode dedups globally by word: once a word has a card, it
+never comes up again. Annotation Mode dedups **per file** instead — the same
 word appearing in two different notes is not treated as a duplicate and
 will produce a card from each note. What's tracked is which *files* have
 already been read: every file's size is checked against what was recorded
@@ -281,22 +311,28 @@ they happen to reuse the same words. Moving or renaming a file resets its
 tracking (it's read as if brand-new), since a renamed file can't be told
 apart from a genuinely new one.
 
-**Known limitation**: there is no lemmatization/stemming. A conjugated verb
+**Known limitations**: there is no lemmatization/stemming. A conjugated verb
 or plural noun found in your notes is treated as its own distinct word from
-its dictionary form (e.g. "mangera" won't be recognized as "manger").
+its dictionary form (e.g. "mangera" won't be recognized as "manger"). The
+sentence a highlight is quoted from is found with a simple nearest-
+punctuation scan, not a real sentence parser — it can misjudge boundaries
+around abbreviations, decimals, or quoted dialogue.
 
 ---
 
 ## Card templates
 
-Controls the visual layout of your cards, independently of the card type.
+Controls the visual layout of your cards, independently of which fields you've enabled.
 
 | Template | Description |
 |---|---|
 | `dark` | Dark background with blue accents (Catppuccin Mocha palette) |
 | `light` | Clean white with soft color accents |
-| `minimal` | Text only — no GIF, no gender badge. Focus on language |
-| `immersive` | GIF fills the card background with text overlay |
+| `minimal` | Plain, distraction-light serif styling |
+| `immersive` | High-contrast dark styling with a large, framed GIF |
+
+Templates control visual styling only — which fields actually appear is
+entirely up to your [Card fields](#card-fields) checklist, not the template.
 
 Change the template from **Configure → Deck & cards** in the menu, or edit `config.py` directly:
 ```python
@@ -308,7 +344,7 @@ CARD_TEMPLATE = "minimal"
 ## Daily workflow
 
 ```
-python main.py  →  Generate  →  Export  →  import deck_new.apkg into Anki  →  repeat
+python main.py  →  Generate new cards (auto-exports at the end)  →  import deck_new.apkg into Anki  →  repeat
 ```
 
 Your progress is saved in `progress.db`. Words already processed are skipped automatically.
@@ -449,19 +485,15 @@ WORDS_PER_RUN   = 50           # words processed per run
 TOTAL_WORD_POOL = 2000         # total pool size (either word source)
 MEANING_EXHAUSTIVENESS = "important"  # essential | important | all — meanings (cards) per word
 
-WORD_SOURCE             = "frequency_list"  # frequency_list | markdown_notes — see Word sources
+WORD_SOURCE             = "frequency_list"  # frequency_list | markdown_notes — set via
+                                             # Generate new cards' first step, see Word sources
 MARKDOWN_NOTES_PATH     = ""                # folder or single .md file, per MARKDOWN_SOURCE_MODE
 MARKDOWN_SOURCE_MODE    = "folder"          # folder | file
 MARKDOWN_EXTRACTION_MODE = "highlights"     # highlights | all_words
 
 CARD_TEMPLATE = "dark"         # dark | light | minimal | immersive
-CARD_TYPE     = "basic"        # basic | basic_reversed | type_answer | cloze — Word-based cards only
-CREATION_MODE = "word_meaning" # word_meaning | phrase_context | audio_meaning | audio_writing |
-                                # audio_typing | phrase_native_writing | phrase_audio_recognition |
-                                # phrase_audio_typing
-CREATION_MODE_VERBOSITY = "complete"  # complete | simple — audio/production styles only
-# Both settings above are best edited via Configure -> Card content in
-# either interactive menu (a guided flow), not by hand — see Creation modes.
+CARD_FIELDS_JSON = '...'       # field checklist (enabled/position/order/interaction per field) —
+                                # set via Generate new cards' field checklist, see Card fields
 
 ENABLE_CATEGORIES = True       # AI-tagged subdecks + topic:: tags (e.g. "Phrasal Verbs")
 
@@ -517,8 +549,8 @@ GIPHY_API_KEY     = "your_giphy_api_key_here"
 Future goals for this project.
 
 - [ ] Add [AnkiConnect](https://ankiweb.net/shared/info/2055492159) support to export/import cards directly into a running Anki instance, without producing a `.apkg` file first — offered **alongside** the existing `.apkg` export, not replacing it
-- [ ] Pass the *actual sentence* a markdown-sourced word was found in through to the AI prompt as authentic context, instead of discarding it once the word pool is built — would let **Phrase in Context** reuse the user's real example sentence instead of an AI-invented one
 - [ ] Support additional file types beyond Markdown as a word source (`.txt`, `.pdf`, `.docx`, etc.), not just `.md`
+- [ ] A way to rewrite/regenerate cards that were already created under a previous field configuration (or the older creation-mode system it replaced) into whatever Card Fields layout is currently active, instead of leaving old cards permanently stuck in the shape they were originally generated in
 
 ---
 
