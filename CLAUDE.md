@@ -131,20 +131,15 @@ Table: `cards`
 
 Table: `export_log` — tracks export history (date, type, card count)
 
-Table: `markdown_file_state` — per-file read tracking for `WORD_SOURCE =
-"markdown_notes"` (see § Word sources). One row per `(creation_mode,
-file_key)` — `creation_mode` here is always the literal string
-`"annotation"` (word-extraction/dedup namespace, unrelated to the `cards`
-table's `standard`/`cloze` column of the same name — kept as a column name
-for schema continuity, not because the two concepts still line up).
-`file_key` is the tracked file's path relative to `MARKDOWN_NOTES_PATH` in
-folder mode, or its bare filename in file mode. `file_size` is the file's
-on-disk size as of the last time its baseline *fully converged* with its
-content — nullable, and deliberately left `NULL` whenever some of the
-file's current content hasn't been confirmed yet (see § Word sources for
-why). `items_json` is a JSON array of the extracted items (highlight spans
-or words, lowercased) already accounted for in that file's baseline.
-`UNIQUE(creation_mode, file_key)`.
+Table: `markdown_file_state` — **unused, dead schema.** Originally
+per-file read tracking for `WORD_SOURCE = "markdown_notes"`, one row per
+`(creation_mode, file_key)` with a `file_size`/`items_json` baseline. This
+mode has since been redesigned to have no dedup at all (see § Word
+sources) — nothing reads or writes this table anymore
+(`_build_markdown_pending()` no longer consults it, and
+`_commit_markdown_file_state()`/`get_markdown_file_state()` were removed
+outright). Left in `init_db()`'s schema purely so an existing
+`progress.db` doesn't need a migration; safe to ignore.
 
 Uniqueness constraint: `(creation_mode, content_key, meaning_id)` — one row
 per distinct piece of content per Model shape. `get_processed_words(conn,
@@ -153,9 +148,10 @@ switching the example-phrase interaction between reveal and cloze gives
 each its own independent dedup pool — same mechanism as before, now keyed
 on Model shape instead of the old CREATION_MODE registry entry. This is
 the dedup mechanism for `WORD_SOURCE = "frequency_list"` (Spontaneous
-Mode); `"markdown_notes"` (Annotation Mode) uses `markdown_file_state`
-instead and deliberately does **not** consult `get_processed_words()` —
-see § Word sources.
+Mode) only; `"markdown_notes"` (Annotation Mode) deliberately has no
+dedup mechanism at all — `_content_key()` nonce's every Annotation Mode
+key so this same constraint can never block a re-processed highlight
+from inserting — see § Word sources.
 
 Soft migrations (additive `ALTER TABLE ADD COLUMN`, wrapped in
 `try/except: pass`) are applied on every `init_db()` call, so the schema
@@ -230,6 +226,14 @@ content-addressed on `text + lang + provider + voice` (not just `text +
 lang`) so switching provider/voice can't collide with a previously-cached
 gTTS file for the same text.
 
+`_pocket_tts_voice_options(lang_code)` (main.py) — the Picker option list
+for the Source/Target voice rows — labels each voice as
+`"<Voice>(<Language>)"`, e.g. `"Estelle(French)"`, deriving the language
+straight from the resolved Pocket TTS language id (strip a trailing
+`"_24l"`, title-case what's left) rather than a separate display-name
+table. Mirrored identically in `cli/src/screens.mjs`'s
+`pocketTtsVoiceOptions()`.
+
 ## AI prompt structure
 
 One unified prompt template (`PROMPT_TEMPLATE_UNIFIED` in main.py) drives
@@ -302,14 +306,22 @@ requested (deck-routing/tagging infrastructure, not checklist fields).
 
 ## Card fields
 
-**Card content/layout is fully field-driven, not mode-driven.**
-The old design it replaced (`CREATION_MODE` picking from 8 pre-built card shapes,
-`CARD_TYPE` picking basic/reversed/type-answer/cloze, `CREATION_MODE_
-VERBOSITY` toggling which fields a mode showed, and a 4-axis "Card
-content" cascading picker over all of it) was retired in one clean break —
-see § Versioning. It's replaced by a single checkbox configuration: which
-of the 11 canonical fields (§ Anki note fields) appear on the card, where
-(front/back), in what order, and how.
+**Spontaneous Mode only.** Annotation Mode has its own, much simpler
+content system — § Annotation Mode content presets, below — since a
+free-form 11-field checklist turned out to be more surface than
+Annotation Mode's actual job needs. Everything in this section (`config.
+CARD_FIELDS_JSON`, `configure_card_fields()`, `save_card_fields()`)
+applies to Spontaneous Mode exclusively; Annotation Mode never reads or
+writes `CARD_FIELDS_JSON`.
+
+**Card content/layout is fully field-driven, not mode-driven** (within
+Spontaneous Mode). The old design it replaced (`CREATION_MODE` picking
+from 8 pre-built card shapes, `CARD_TYPE` picking basic/reversed/type-
+answer/cloze, `CREATION_MODE_VERBOSITY` toggling which fields a mode
+showed, and a 4-axis "Card content" cascading picker over all of it) was
+retired in one clean break — see § Versioning. It's replaced by a single
+checkbox configuration: which of the 11 canonical fields (§ Anki note
+fields) appear on the card, where (front/back), in what order, and how.
 
 ### `config.CARD_FIELDS_JSON`
 
@@ -333,13 +345,21 @@ A JSON array, one entry per `FIELD_CATALOG` key (main.py):
   `{{type:Field}}` typed-answer check) | `"cloze"` (blank the field inline
   — legal only for `text_example_phrase`).
 
-`load_card_fields()`/`save_card_fields()` (main.py) read/write this
-wholesale through the existing `write_config()` (never field-by-field).
-`load_card_fields()` merges over `_DEFAULT_FIELD_ENTRY` so a missing/
-corrupt blob (a key introduced after a user's `config.py` was written,
-hand-edited JSON) always yields one complete, valid entry per catalog
-field rather than crashing. `_enabled_keys()`/`_cloze_active()` are the
-two derived-state helpers everything else reads.
+`load_card_fields()` (main.py) is Spontaneous-Mode-only — the choke point
+every field-configuration consumer in this section reads through
+(`build_anki_model()`, `_cloze_active()`, `_assemble_side()`, and
+Spontaneous Mode's own branches of `_generate_loop()`/`export_decks()`/
+`build_notes()`). Annotation Mode never calls it and never touches
+`CARD_FIELDS_JSON` at all — it has its own dedicated Model/Note-building
+path (§ Annotation Mode content presets, below). `save_card_fields()`
+(main.py) writes `CARD_FIELDS_JSON` wholesale through the existing
+`write_config()` (never field-by-field) and is likewise
+Spontaneous-Mode-only. `load_card_fields()` merges over
+`_DEFAULT_FIELD_ENTRY` so a missing/corrupt blob (a key introduced after a
+user's `config.py` was written, hand-edited JSON) always yields one
+complete, valid entry per catalog field rather than crashing.
+`_enabled_keys()`/`_cloze_active()` are the two derived-state helpers
+everything else reads.
 
 ### Dynamic Model/Template assembly
 
@@ -376,10 +396,17 @@ fragment, e.g. `{{#Text_Meaning}}<div class="meaning">{{Text_Meaning}}
 strings — one entry per catalog field, wrapped in `{{#Field}}...{{/Field}}`
 so a field that's enabled but happens to come back empty for one specific
 card (AI miss, no GIF match) renders nothing instead of an empty box.
-`build_notes()` keeps exactly the shape the old generic non-`word_meaning`
-branch already had (positionally fill all 11 field slots, `""` for
-whatever wasn't generated) — no per-field gating needed there at all,
-since `_assemble_side()` already decided what's visible.
+`build_notes()` positionally fills all 11 field slots (`""` for whatever
+wasn't generated) — no per-field gating needed there at all, since
+`_assemble_side()` already decided what's visible. The value list is
+built as a `{anki_field_name: value}` dict mapped through the same
+`FIELD_CATALOG` order `_build_standard_model()` uses to declare the
+Model's fields, deliberately — an earlier version hand-typed the value
+list in a stale pre-3.0 order that had silently drifted from
+`FIELD_CATALOG`'s order, a real shipped bug (audio/GIF/text landed in the
+wrong Anki field and rendered as silent/invisible/misplaced) fixed by
+tying both lists to the same source instead of maintaining them
+independently.
 
 ### Note-sourced vs. AI-generated content
 
@@ -393,12 +420,14 @@ line that encodes this.
 
 ### Guided flow — "Choose Card Fields"
 
-`configure_card_fields()` (main.py) is `run_generate_wizard()`'s one step
-— mode is no longer chosen here at all, since it's now the app's outermost
-screen, above the Main Menu the wizard itself lives under (§ Interactive
-menu structure) — not a persistent Configure sub-screen, since reusing
-this outside the wizard would have nothing to attach to (which fields are
-AI-requestable depends on the already-active mode). One row per `FIELD_CATALOG` entry,
+`configure_card_fields()` (main.py) is `run_generate_wizard()`'s step 2
+for Spontaneous Mode (Annotation Mode gets `configure_annotation_content()`
+instead — § Annotation Mode content presets) — mode is no longer chosen
+here at all, since it's now the app's outermost screen, above the Main
+Menu the wizard itself lives under (§ Interactive menu structure) — not a
+persistent Configure sub-screen, since reusing this outside the wizard
+would have nothing to attach to (which fields are AI-requestable depends
+on the already-active mode). One row per `FIELD_CATALOG` entry,
 each opening a detail screen (`_field_detail_menu()`) with Enabled
 (Toggle)/Position/Order/Interaction — `_FieldEnabledToggle`/
 `_FieldSubPicker`/`_FieldSubNumber` (tui.py subclasses) read/write through
@@ -416,6 +445,169 @@ a `FIELD_HTML` snippet in each of the 4 templates. If the field is
 AI-sourced, add a `FIELD_PROMPT_SPECS` entry too (§ AI prompt structure).
 No schema, Model-family, or dispatch changes needed — `_assemble_side()`/
 `build_notes()` are already fully generic over the catalog.
+
+---
+
+## Annotation Mode content presets
+
+**Annotation Mode does not use `CARD_FIELDS_JSON` / `configure_card_fields()`
+at all, and its card is deliberately minimal: the highlighted phrase/word
+(in its sentence, when available) on the front, its translation on the
+back — nothing else.** No IPA, no gender, no synonyms, no separate
+example-translation field, and **no image, ever** — GIFs are a
+Spontaneous-Mode-only concept (see § Word sources for why the AI is never
+even asked for `gif_keywords` in this mode). The only real choices left
+are a plain boolean (include word-pronunciation audio or not) and a
+card-type pick, both written as plain `config.py` keys and consumed on
+the fly:
+
+- `config.ANNOTATION_INCLUDE_AUDIO` (bool, default `True`) — whether
+  word-pronunciation audio is generated and included, alongside the
+  always-on phrase/word + translation.
+- `config.ANNOTATION_CARD_TYPE` — how the card tests you: `"basic"`
+  (default, reveal the translation) | `"type_in"` (type the phrase/word to
+  flip the card) | `"cloze"` (blank the phrase/word within its sentence).
+
+**Annotation Mode has its own dedicated genanki `Model` — it does not
+participate in Spontaneous Mode's general 11-field `Model` at all.** An
+earlier version of this feature translated a content preset into a
+`CARD_FIELDS_JSON`-shaped list and fed it through the shared
+`build_anki_model()`/`build_notes()`/`_assemble_side()` pipeline — that
+shipped a real bug (two independently hand-typed field-name/field-value
+lists silently drifted apart inside `build_notes()`'s non-cloze branch,
+so audio/GIF/text landed in the wrong Anki field and rendered as silent/
+invisible/misplaced — this equally affected Spontaneous Mode's own
+standard cards, and was fixed there too, see below) and left Annotation
+Mode's cards sharing `config.MODEL_ID` with Spontaneous Mode, which risks
+Anki not refreshing an already-imported note type's templates on
+reimport. Both problems are why Annotation Mode now has its own small,
+fixed field set instead:
+
+- **`_ANNOTATION_FIELD_NAMES`** (main.py) — `Word`, `Text_Example_Phrase`,
+  `Text_Meaning` (used as "Translation" — see below), `Sound_Word`.
+  **`_ANNOTATION_CLOZE_FIELD_NAMES`** — `Cloze_Text`, `Word`,
+  `Text_Meaning`, `Sound_Word` (`Word` stays declared-but-unrendered for
+  the cloze layout, matching the existing Spontaneous-Mode cloze model's
+  precedent of keeping the full identity field set even when a given
+  template doesn't surface every one of them). No `Image`/`Image_Raw` in
+  either list — a GIF is structurally impossible on an Annotation Mode
+  note, not just hidden. Neither list overlaps the canonical 11 fields in
+  § Anki note fields — this is a structurally different, smaller Model,
+  the same precedent Spontaneous Mode's own cloze Model already set.
+- **`_build_annotation_model(template, card_type)`** (main.py) —
+  hand-written `qfmt`/`afmt` per `card_type` (only 3 exist, fixed layout,
+  no position/order picker for this mode — unlike Spontaneous Mode's
+  checklist), reusing the same `template.FIELD_HTML["word"/
+  "text_example_phrase"/"text_meaning"/"audio_word"]` snippets every other
+  mode already renders with (no template.py changes needed; the
+  `"image"` snippet is simply never referenced here). Own `MODEL_ID`
+  range: `config.MODEL_ID + 20` (basic/type_in — same field set, only the
+  template string differs, matching the existing precedent that
+  `MODEL_ID` doesn't change for an interaction-only change) /
+  `config.MODEL_ID + 30` (cloze — different field set, needs its own
+  Model, the same `MODEL_ID + 10` precedent Spontaneous Mode's cloze
+  Model already set) — a range Spontaneous Mode's `MODEL_ID`/
+  `MODEL_ID + 10` never uses, so Annotation Mode's note type can never
+  collide with or be shadowed by an already-imported Spontaneous Mode one.
+- **`build_notes()`** branches on `config.WORD_SOURCE == "markdown_notes"`:
+  it builds a `{anki_field_name: value}` dict and maps it through the
+  *exact same* `_ANNOTATION_FIELD_NAMES`/`_ANNOTATION_CLOZE_FIELD_NAMES`
+  list `_build_annotation_model()` used to declare the Model's fields —
+  so the declared names and each Note's positional values can never
+  drift apart again. Spontaneous Mode's standard-model branch got the
+  identical fix (a `{anki_field_name: value}` dict mapped through
+  `FIELD_CATALOG`, replacing the old hand-typed positional list that had
+  drifted from `FIELD_CATALOG`'s order) — this is the actual bug fix, not
+  just an Annotation Mode change. Cloze text uses `make_cloze_text(
+  _strip_example_markup(text_example), word)`, identical to the existing
+  Spontaneous-Mode cloze path. **The `(category, note)` deck-routing
+  tuple always uses `""` for Annotation Mode regardless of `category`** —
+  the `topic::<Category>` tag (built from the un-forced `category` local
+  variable, just above) still applies, but the note itself never gets
+  filed into a category subdeck (see § Category / subdeck organization).
+- **`_effective_annotation_card_type()`** (main.py) — the single source
+  of truth for the Cloze/extraction-mode fallback below, used by
+  `_generate_loop()`, `export_decks()`/`build_notes()`, and
+  `configure_annotation_content()`'s option-list filtering.
+- **`_generate_loop()`** no longer calls `load_card_fields()` for
+  Annotation Mode — it derives `enabled` directly from
+  `{"word", "text_example_phrase", "text_meaning"}` plus `"audio_word"`
+  when `config.ANNOTATION_INCLUDE_AUDIO` is true (`"image"` is never
+  added — this is what keeps Giphy/`gif_keywords` activity out of this
+  mode entirely) and `target_mode` from `_effective_annotation_card_type()`
+  (`"annotation"` or `"annotation_cloze"` — `cards.creation_mode` values,
+  alongside Spontaneous Mode's existing `"standard"`/`"cloze"`;
+  `_warn_legacy_rows()` and `get_all_cards()`/`get_processed_words()` all
+  already treat `creation_mode` as an opaque per-mode filter key, so this
+  needed no changes there beyond `_warn_legacy_rows()`'s hardcoded
+  exclusion list). `strip_for_typing` is always `False` for Annotation
+  Mode — its `type_in` card type tests `Word`, never
+  `Text_Example_Phrase`, so there's nothing to strip there (cloze
+  stripping happens independently inside `build_notes()`, unconditionally,
+  same as Spontaneous Mode's cloze path always has). `card_exists()` is
+  never consulted for `mode == "annotation"` — see § Word sources, this
+  mode has no dedup at all.
+- **`load_card_fields()`** is Spontaneous-Mode-only again (no
+  `WORD_SOURCE` dispatch) — `CARD_FIELDS_JSON` is never read or written by
+  Annotation Mode.
+
+Per-`card_type` field layout (all always populate `Word` +
+`Text_Example_Phrase` + `Text_Meaning`; `Sound_Word` is populated only
+when `ANNOTATION_INCLUDE_AUDIO` is true, empty string otherwise):
+
+| card_type | front | back |
+|---|---|---|
+| `basic` | `Text_Example_Phrase` (reveal) only | `Text_Meaning` (reveal) + audio |
+| `type_in` | `Text_Meaning` (reveal, the prompt) + `Word` (**`{{type:Word}}`**) | `Text_Example_Phrase` (reveal, full context) + audio |
+| `cloze` | `{{cloze:Cloze_Text}}` only | `Text_Meaning` (reveal) + audio |
+
+**`basic`'s front is deliberately just `Text_Example_Phrase`, not
+`Word` + `Text_Example_Phrase` stacked** — an earlier version showed both,
+which looked redundant (`Text_Example_Phrase` already *is* "phrase/word",
+via `highlight_word()`'s `<span>` around the exact anchor text within its
+sentence — or the AI-generated fallback example when there's no note
+context) and, worse, meant a highlight spanning most of a sentence showed
+nearly the same text twice. `Word` stays declared on the Model (still
+needed for `type_in`'s `{{type:Word}}` and for browsing/searching in
+Anki) — it's just never rendered a second time on `basic`'s front.
+
+**Cloze needs real sentence context**, so it only makes sense when
+`MARKDOWN_EXTRACTION_MODE = "highlights"`. If `ANNOTATION_CARD_TYPE ==
+"cloze"` while extraction mode is `"all_words"` (e.g. the user switched
+extraction mode after picking Cloze), `_effective_annotation_card_type()`
+silently falls back to `"basic"` — same defensive spirit as
+`load_card_fields()`'s Spontaneous-Mode merge-over-defaults for a
+corrupt/stale blob.
+
+**Translation, not a dictionary definition.** `text_meaning`'s AI prompt
+instruction (`FIELD_PROMPT_SPECS`, § AI prompt structure) is
+mode-conditional in `_build_dynamic_prompt()`: Annotation Mode swaps in
+`_ANNOTATION_TRANSLATION_INSTRUCTION` (main.py) — a direct, concise
+translation of the anchor phrase/word into `TARGET_LANG`, as literally
+used in the quoted sentence — instead of the Spontaneous-Mode "dictionary-
+style definition" instruction. No new catalog field, DB column, or Anki
+field rename — `Text_Meaning`/`text_meaning` stay exactly as they are
+structurally; only the instruction text differs by mode.
+
+### Guided flow — "Choose Content & Card Type"
+
+`configure_annotation_content()` (main.py) is `run_generate_wizard()`'s
+step 2 for Annotation Mode — a `Toggle` (include word-pronunciation audio)
+plus a `Picker` (Card type) instead of `configure_card_fields()`'s
+per-field detail screens, writing `ANNOTATION_INCLUDE_AUDIO`/
+`ANNOTATION_CARD_TYPE` directly via the existing `write_config()`. The
+Card type picker's option list drops `"cloze"` outright when
+`MARKDOWN_EXTRACTION_MODE != "highlights"` (same conditional-row
+precedent `configure_generation(mode)`'s "Words per run" row already
+established). The JS mirror (`annotationContentMenu()`, screens.mjs) is
+an independent implementation over the same `--options-json`
+`annotation_card_types` data — same "no shared runtime between Python and
+JS" precedent `cardFieldsMenu()` set. `run_generate_wizard()`/
+`runGenerateWizard()` branch on `config.WORD_SOURCE`/`WORD_SOURCE` to
+call this instead of `configure_card_fields()`/`cardFieldsMenu()` for
+Annotation Mode. Since this screen runs once per generation, right before
+`_do_generate()`, it already doubles as "pick the card type for this
+whole run" — no separate per-run mechanism was needed.
 
 ---
 
@@ -447,66 +639,95 @@ than through one shared filter:
   `(word, None)` pair — the `None` context means "nothing note-sourced";
   see below.
 
-- **Annotation Mode (`"markdown_notes"`)** — dedup is **per-file, not
-  per-word**. A word repeating across two different notes is not treated
-  as a duplicate — it legitimately flows through both times (the existing
-  `UNIQUE(creation_mode, content_key, meaning_id)` constraint + the
-  `card_exists()` check in `_generate_loop` are what actually stop a
-  literal duplicate *card* from being written; this filter is orthogonal to
-  that and never consults `get_processed_words()`). What *is* tracked is
-  which files have already been read: `_build_markdown_pending(conn,
-  "annotation")` (main.py — the tracking-namespace argument is always the
-  literal string `"annotation"` now, see § Database schema) resolves
-  `config.MARKDOWN_NOTES_PATH` into a file list (`"folder"` — recursively
-  walks it via `_iter_markdown_files`, sorted by path; `"file"` — a single
-  `.md` path), strips markdown noise (`_strip_markdown_noise`), and
-  extracts `(item, context)` pairs per `config.MARKDOWN_EXTRACTION_MODE`:
+- **Annotation Mode (`"markdown_notes"`)** — **has no dedup at all, by
+  design.** The database has no bearing on what counts as "new" here:
+  every run re-reads the tracked file(s) in full and produces one card
+  per highlight found, including exact repeats of a previous run's cards
+  and repeats of the same word within one file (e.g. the same word
+  highlighted twice, in two different sentences, is two cards — not
+  collapsed to one). This is a deliberate product decision, not a
+  simplification of a more careful mechanism: an earlier version of this
+  mode kept a per-file baseline in `markdown_file_state` (see
+  § Database schema) and only surfaced highlights not already seen —
+  that table and its supporting code (`_commit_markdown_file_state()`,
+  `get_markdown_file_state()`, `_markdown_file_key()`) have since been
+  removed; `markdown_file_state` itself is left in the schema, unused,
+  purely so an existing `progress.db` doesn't need a migration.
+  `_build_markdown_pending(conn, "annotation")` (main.py — the second
+  argument is accepted only for call-site symmetry, nothing is read from
+  or written to the database) resolves `config.MARKDOWN_NOTES_PATH` into
+  a file list (`"folder"` — recursively walks it via
+  `_iter_markdown_files`, sorted by path; `"file"` — a single `.md`
+  path), strips markdown noise (`_strip_markdown_noise`), and extracts
+  every `(item, context)` occurrence per `config.MARKDOWN_EXTRACTION_MODE`
+  (capped at `config.TOTAL_WORD_POOL` combined across all files, as a
+  safety valve — unrelated to dedup, since there isn't any):
   - `"highlights"` — `_extract_highlights_with_context()` returns every
     `==highlighted==` span **plus the sentence it sits in** (markers
     stripped back out of the captured range). The sentence-boundary walk
     is a simple nearest-punctuation (`.!?`) / paragraph-break scan, not a
     real parser — naive on abbreviations, decimals, quoted dialogue, and
     non-Latin/inverted punctuation. A documented limitation, not a bug.
+    The window is additionally clamped so it never crosses into a
+    *neighboring* highlight's own `==...==` span — without this, two
+    highlights close together with no sentence-ending punctuation between
+    them (a compact vocabulary-list note, one highlight per line) each
+    swallowed the other's raw markup into their "sentence", producing
+    identical bloated contexts for both cards and, when the window cut
+    through the middle of a highlight's markers instead of the whole
+    thing, a dangling literal `==` that never got substituted back out —
+    a real bug, confirmed against a real note sample, not just the
+    documented punctuation-naivety limitation above.
+
+    **The highlighted span is always the anchor, verbatim — a heading is
+    never substituted in, even when it directly labels the highlight**
+    (e.g. `### secondes */səgɔ̃d/*` immediately followed by `- ==Attends-
+    moi 2 secondes.==`). An earlier version of this function *did* swap
+    the heading's raw text in as the anchor for exactly this shape — a
+    narrower attempt to stop an entire highlighted sentence from becoming
+    the anchor when a heading clearly named a single intended word — but
+    that shipped a worse, real, reported bug: a heading holding more than
+    a bare word (IPA notation, a grammar note, anything past the word
+    itself) polluted both the visible card front and the AI's translation
+    target verbatim, and since that raw heading text doesn't actually
+    appear in the quoted sentence, the AI's behavior became unreliable
+    (translating the whole sentence in some cases, guessing at the
+    nearest real word in others). Removed outright rather than patched —
+    today's simplified card (§ Annotation Mode content presets) is built
+    around "the literal highlighted span *is* the card," whether that
+    span is a single word or a whole sentence, so there's no case where
+    substituting a heading in is actually correct. This requires heading
+    markup (`#`/`##`/...) to still be present in the text this function
+    receives — unlike `"all_words"` mode, the `"highlights"` path calls
+    `_strip_markdown_noise(raw, strip_headings=False)` so heading
+    *positions* survive, purely so a heading line can still act as a hard
+    boundary for the sentence-context walk below (the same defensive
+    reason as the neighboring-highlight clamp above — a heading with no
+    punctuation after it could otherwise bleed into the *next*
+    highlight's context). A highlight is also almost always written as a
+    list item (`- ==...==`), so the boundary walk's extracted sentence
+    has a leading bullet/ordinal marker (`_MD_LEADING_BULLET_RE`) stripped
+    off before use — otherwise a literal `"- "` would leak onto the card
+    front the same way the heading text used to.
   - `"all_words"` — `_extract_all_words()` still returns bare words with no
     surrounding context (`context = None` for every item) — a single
     ranked word has no one "sentence" to attribute to it.
 
-  This all happens **per file**, diffed against a stored per-file baseline
-  in `markdown_file_state` (see § Database schema), instead of merging
-  everything into one flat pool immediately:
-  - Each file is identified by `_markdown_file_key()`: its path relative to
-    `MARKDOWN_NOTES_PATH` in folder mode (so two same-named files in
-    different subfolders are tracked independently), or its bare filename
-    in file mode.
-  - If a file's current on-disk size still matches its stored `file_size`,
-    it's skipped outright — untouched since it last fully converged, no
-    re-read or re-diff needed.
-  - Otherwise it's re-extracted, and only items **not already in its stored
-    baseline** are new — these are what get submitted to the AI this run.
-    If nothing new turns up (content was only trimmed or reworded, nothing
-    added), the file contributes nothing to `pending`, and its baseline is
-    simply narrowed to whatever's still present (removed items quietly drop
-    out; no cards are ever deleted or generated for a removal).
-  - After `_generate_loop` runs, `_commit_markdown_file_state()` writes each
-    diffed file's new baseline back. Only items `_generate_loop` actually
-    *confirmed* (`on_word_done(word, True)` — the AI returned usable data;
-    same "skip and retry next run" semantics the AI-failure path already
-    had for the `cards` table, now extended to this baseline too — see
-    `_generate_loop`'s docstring) are folded in. Critically, `file_size` is
-    only advanced to the file's current on-disk size when the new baseline
-    **exactly equals** the file's full current item set — i.e. full
-    convergence. If `config.WORDS_PER_RUN` caps the run before every new
-    item in a file was attempted, `file_size` is left `NULL` on purpose:
-    writing the current size prematurely would make the size-shortcut
-    above wrongly treat the file as fully caught up next run, silently
-    losing the untouched remainder forever. Leaving it `NULL` just forces
-    one more cheap re-diff (regex + set difference, not an AI/audio/GIF
-    call) next run, which correctly re-surfaces what's left.
+  Every file is read and re-extracted in full, every run — there is no
+  per-file baseline, no on-disk-size shortcut, and no filtering against
+  what a previous run already produced. `_generate_loop()` also skips its
+  `card_exists()` gate entirely for `mode == "annotation"` (see below),
+  and `_do_generate()`/`_run_headless()` pass `len(pending)` as
+  `_generate_loop()`'s limit — **Annotation Mode has no per-run cap**,
+  unlike Spontaneous Mode's `config.WORDS_PER_RUN` — so every highlight
+  found this run is attempted in the same pass (a document's highlight
+  set is finite and user-authored, not an endless pool to throttle
+  against).
 
 ### Note-sourced content
 
 The `context` half of each `(item, context)` pair is what lets Annotation
-Mode fill in the "Content" gap from § Card fields' requirement 1: in
+Mode source its example phrase from the note itself instead of the AI: in
 `_generate_loop()`, whenever `mode == "annotation"` and `context` is
 truthy (`note_sourced_example`), `text_example_phrase`'s content becomes
 the literal sentence — `highlight_word(context, anchor)` wraps the exact
@@ -514,37 +735,38 @@ anchor text in a `<span class="highlight">`, reusing the same CSS class
 `highlight_delimited()`'s `**marker**`-based highlighting already uses, so
 no template changes were needed — and that field is excluded from the set
 requested from the AI for that call. `Word`'s content is always the
-literal `anchor` string regardless of mode (never AI-generated). Every
-other enabled field (`ipa`, `gender`, `text_meaning`,
-`text_example_translation`, `synonyms`, `image` → `gif_keywords`) is
-always AI-generated, in the same call, using the quoted sentence as
-context (§ AI prompt structure) — a markdown note realistically never
-contains an IPA transcription or a synonym list, so there's nothing to
-extract for those. `_content_key()` hashes `word::sentence` for Annotation
-Mode specifically so the same word highlighted in two different sentences
-produces two distinct cards, not a dedup collision (§ Database schema).
+literal `anchor` string regardless of mode (never AI-generated).
+`text_meaning` is the only other field ever requested from the AI in this
+mode (§ Annotation Mode content presets — the card has no IPA, gender,
+synonyms, or separate example-translation field to fill in the first
+place), generated in the same call using the quoted sentence as context
+(§ AI prompt structure). `_content_key()` folds a fresh `uuid4` nonce into
+the `word::sentence` hash for Annotation Mode specifically, so no two
+calls ever produce the same key — this is what lets a re-processed
+highlight (even an exact repeat) insert as a new row instead of being
+silently dropped by the `UNIQUE(creation_mode, content_key, meaning_id)`
+constraint (§ Database schema) — the mechanical enforcement of "no dedup"
+above.
 
-Both extraction modes are still capped at `config.TOTAL_WORD_POOL` overall
-(across all files' new items combined, not per file). An empty/invalid
+Extraction is still capped at `config.TOTAL_WORD_POOL` overall (across all
+files' items combined, not per file). An empty/invalid
 `MARKDOWN_NOTES_PATH` (for the active `MARKDOWN_SOURCE_MODE`) still prints
 a `[WARN]` and returns an empty pool rather than raising.
 
-No new third-party dependency was needed (pure `os`/`re`/`json`), so unlike
-the `anthropic`/`pocket_tts` lazy-optional-import pattern (see § AI
-provider layer / § Local TTS provider), this code is imported
-unconditionally at the top of main.py.
+No new third-party dependency was needed (pure `os`/`re`), so unlike the
+`anthropic`/`pocket_tts` lazy-optional-import pattern (see § AI provider
+layer / § Local TTS provider), this code is imported unconditionally at
+the top of main.py.
 
 **Known limitations**: no lemmatization/stemming exists anywhere in this
 codebase — a word extracted from prose keeps whatever inflected/conjugated
 surface form it appeared in, so e.g. "mangera" and "manger" are treated as
-two unrelated anchor words. A moved or renamed file (its path relative to
-`MARKDOWN_NOTES_PATH` changes) is indistinguishable from a brand-new file —
-its `file_key` no longer matches any stored row, so its content is
-re-diffed from scratch against an empty baseline; already-carded words are
-still deduped only by the DB's own uniqueness constraint, not by any memory
-of the old file's history. The sentence-boundary heuristic (above) is a
+two unrelated anchor words. The sentence-boundary heuristic (above) is a
 regex walk, not a real sentence parser — treat its output as "close
-enough for AI context," not authoritative.
+enough for AI context," not authoritative. And since this mode has no
+dedup at all, running it repeatedly over an unchanged note deliberately
+produces a fresh duplicate card set every time — that's the point, not a
+bug to guard against.
 
 ---
 
@@ -616,6 +838,13 @@ groupings (French might warrant "Faux Amis", Japanese might warrant "Keigo").
 - `config.ENABLE_CATEGORIES` (default `True`) is the master switch — when
   `False`, the AI isn't asked for a category, and even a category already
   stored in the DB is ignored at export time (no subdeck, no `topic::` tag).
+- **Annotation Mode never gets a subdeck, tags only.** `build_notes()`
+  still computes `category` and the `topic::<Category>` tag exactly as
+  above for Annotation Mode, but the `(category, Note)` tuple it appends
+  for deck routing always carries `""` for that mode instead — so
+  `_build_deck_tree()` files every Annotation Mode card into the root
+  deck regardless of category, while the `topic::` tag still applies (see
+  § Annotation Mode content presets).
 
 ---
 
@@ -742,22 +971,36 @@ Choose Creation Mode                          (outermost screen)
   [0] Exit                                    — quits the app (no screen above this one)
 
   └─> Main Menu — <Mode Label>
-        [1] Generate new cards      — field checklist -> generate + auto-export
+        [1] Generate new cards      — content config (mode-dependent) -> generate + auto-export
         [2] Export decks            — recent exports, then a filename prompt -> writes one full-backup .apkg
         [3] Configure                — Language / AI & API / Deck & cards / Generation / Audio / GIF / Rate limits
         [4] Statistics               — total cards, by POS, recent activity, export history
         [0] Exit                     — back to Choose Creation Mode (not the app)
 
-Generate new cards -> Choose Card Fields
-  one row per field (Word, IPA, Gender, Image, Meaning, Example phrase,
-  Example translation, Synonyms, Word/Meaning/Example audio) — each opens
-  a detail screen (Enabled / Position / Order / Interaction), see § Card
-  fields — then "Continue -> Generate"
+Generate new cards -> step 2 (mode-dependent)
+  Spontaneous Mode -> Choose Card Fields
+    one row per field (Word, IPA, Gender, Image, Meaning, Example phrase,
+    Example translation, Synonyms, Word/Meaning/Example audio) — each opens
+    a detail screen (Enabled / Position / Order / Interaction), see § Card
+    fields — then "Continue -> Generate"
+  Annotation Mode -> Choose Content & Card Type
+    Include word pronunciation audio (Toggle) + Card type (Picker,
+    "Cloze" hidden unless Markdown extraction = Highlights), see
+    § Annotation Mode content presets — then "Continue -> Generate"
 
 Configure -> Generation Settings           (mode-dependent contents)
-  Annotation Mode:    Words per run, Total word pool, Markdown source mode,
+  Annotation Mode:    Total word pool, Markdown source mode,
                        Markdown notes path, Markdown extraction
+                       (no "Words per run" — every new item found runs in one pass)
   Spontaneous Mode:   Words per run, Total word pool, Meaning exhaustiveness
+
+Configure -> Deck & cards, Audio, GIF     (also mode-dependent)
+  Deck & cards:  category toggle relabeled "Category tags" in Annotation
+                 Mode (no subdecks there, see § Category / subdeck
+                 organization)
+  Audio:         "Example sentence audio"/"Meaning audio" toggles hidden
+                 in Annotation Mode (no such fields on that card)
+  GIF:           row hidden entirely in Annotation Mode (no GIF, ever)
 ```
 
 **Mode is session-only, never persisted.** Picking Annotation or
@@ -839,6 +1082,27 @@ restores the terminal on its own, so this was a UX/consistency fix (now
 matching the JS TUI's existing clean `process.exit(0)` on Ctrl+C via
 `term.mjs`'s `isExitCombo()`), not a terminal-corruption bug.
 
+**`run_generate_wizard()` is deliberately NOT an `Action(print_mode=True)`**
+— it mixes a curses step (`configure_card_fields()`/
+`configure_annotation_content()`, a `run_menu()` picker) with a
+print-based one (`_do_generate()`). Wrapping the whole Action in
+`print_mode=True` used to tear curses down *before* the picker step ran,
+forcing that step's own `run_menu()` call to open a second, fully-nested
+`curses.wrapper()` session (a second `initscr()`/`endwin()` cycle) just to
+get curses back — and restoring the parent window afterward (`_ctx
+['stdscr'] = saved; saved.keypad(True); ...`) without a matching fresh
+`initscr()` left the terminal's arrow-key escape-sequence parsing state
+inconsistent enough that pressing an arrow key right after backing out of
+the picker could misnavigate back into it — a real, reported bug. Fixed
+by extracting `Action(print_mode=True)`'s suspend/restore logic into
+`_tui.run_in_print_mode(func)` (tui.py) and having `run_generate_wizard()`
+call the picker step first — while curses is still the *parent's own live
+window*, so `run_menu()` takes its normal nested-reuse path
+(`_ctx['stdscr'] is not None`) instead of a second `curses.wrapper()` —
+then suspend curses only around `_do_generate()`/`pause()` via
+`run_in_print_mode()`. One `endwin()`/restore cycle total per "Generate
+new cards" invocation, not two nested ones.
+
 **The active Creation Mode is shown in the persistent header on every
 screen**, not just the Main Menu's own title (`f'Main Menu — {label}'`,
 which is invisible as soon as you navigate into Configure or any
@@ -860,18 +1124,25 @@ AI_MODEL / OPENAI_MODEL / ANTHROPIC_MODEL / GEMINI_MODEL / OLLAMA_MODEL
 OLLAMA_HOST                     # local Ollama server address (default http://localhost:11434)
 SOURCE_LANG / TARGET_LANG       # e.g. "fr" / "English"
 TTS_SOURCE_LANG / TTS_TARGET_LANG  # gTTS language codes
-WORDS_PER_RUN                   # new words per script execution
+WORDS_PER_RUN                   # new words per script execution — Spontaneous Mode only;
+                                 # Annotation Mode has no per-run cap (§ Word sources)
 TOTAL_WORD_POOL                 # total frequency pool size
 MEANING_EXHAUSTIVENESS          # "essential" | "important" | "all" (see § AI prompt structure)
 CARD_TEMPLATE                   # "dark" | "light" | "minimal" | "immersive"
-CARD_FIELDS_JSON                # field checklist: enabled/position/order/interaction per field
-                                 # (see § Card fields — set via Generate new cards' wizard, not hand-edited)
+CARD_FIELDS_JSON                # Spontaneous Mode only — field checklist: enabled/position/order/
+                                 # interaction per field (see § Card fields — set via Generate new
+                                 # cards' wizard, not hand-edited)
+ANNOTATION_INCLUDE_AUDIO         # Annotation Mode only — bool, include word-pronunciation audio
+                                 # (see § Annotation Mode content presets)
+ANNOTATION_CARD_TYPE            # Annotation Mode only — "basic" | "type_in" | "cloze"
+                                 # (see § Annotation Mode content presets)
 WORD_SOURCE                     # "frequency_list" | "markdown_notes" (see § Word sources — set via
                                  # Generate new cards' first step, not hand-edited)
 MARKDOWN_NOTES_PATH             # folder or single .md file, per MARKDOWN_SOURCE_MODE
 MARKDOWN_SOURCE_MODE            # "folder" | "file"
 MARKDOWN_EXTRACTION_MODE        # "highlights" | "all_words"
-ENABLE_CATEGORIES               # category subdecks + topic:: tags (see Category / subdeck organization)
+ENABLE_CATEGORIES               # category subdecks + topic:: tags (Annotation Mode: tags only, no
+                                 # subdecks — see Category / subdeck organization)
 ENABLE_AUDIO / ENABLE_GIF       # toggle features on/off
 ENABLE_WORD_AUDIO / ENABLE_EXAMPLE_AUDIO / ENABLE_MEANING_AUDIO
 TTS_PROVIDER                    # "gtts" | "pocket_tts" (see § Local TTS provider)
