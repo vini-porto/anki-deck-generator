@@ -12,6 +12,108 @@ single source of truth main.py, tui.py, and the JS TUI all read from) and is
 shown in the README badge and in both interactive menus.
 
 ## [Unreleased]
+### Fixed
+- **Standard (non-cloze) cards could have audio, GIF, and text landing in
+  the wrong Anki field** — silent audio, invisible GIFs, and misplaced/
+  missing text depending on which fields were enabled. Root cause:
+  `build_notes()` built its Note field *values* in a stale, hand-typed
+  order that had silently drifted from `FIELD_CATALOG`'s order (which
+  `_build_standard_model()` uses to declare the Model's field *names* —
+  genanki matches the two positionally, not by name). This affected
+  Spontaneous Mode's standard cards too, not just Annotation Mode's — the
+  fix ties both lists to the same source so they can't drift apart again.
+- **Two highlights close together in a Markdown note (e.g. a compact
+  vocabulary list, one `==highlight==` per line, no period between them)
+  could swallow each other's raw text into their "sentence" context** —
+  producing identical, bloated content for both resulting cards instead
+  of two clean, distinct ones, and sometimes leaving a literal, un-stripped
+  `==` in the card when the window cut through the middle of the other
+  highlight's markers. `_extract_highlights_with_context()`'s
+  sentence-boundary window is now clamped to never cross into a
+  neighboring highlight's own span.
+- **A heading directly above a highlight (e.g. a personal note-taking
+  convention like `### secondes */səgɔ̃d/*` followed by `- ==Attends-moi
+  2 secondes.==`) had its raw text — IPA notation and all — used verbatim
+  as the card's anchor and translation target, instead of the actual
+  highlighted text.** This polluted the visible card front with the
+  heading's contents and made translation unreliable: since that raw
+  anchor doesn't actually appear in the quoted sentence, the AI would
+  sometimes translate the whole sentence and sometimes guess at whichever
+  real word looked closest instead. The highlighted span is now always
+  the anchor, full stop, regardless of any heading above it — a heading
+  is only ever used as a sentence-boundary marker for the surrounding
+  context. A highlight's extracted sentence also no longer keeps a
+  leading list-bullet marker (`"- "`) — that leaked onto the card front
+  the same way.
+- **After entering Annotation Mode's "Choose Content & Card Type" screen
+  and backing out, arrow keys could misnavigate back into it.** Root
+  cause: `run_generate_wizard()` ran entirely under `Action
+  (print_mode=True)`, which tore curses down *before* the content-picker
+  step — forcing that step to open a second, fully-nested curses session
+  just to display itself, and restoring the parent window afterward
+  without matching that session's own terminal-state changes. Fixed by
+  running the picker while the parent's curses window is still live (its
+  normal behavior) and only suspending curses around the actual
+  print-based generate step.
+- **Gemini calls frequently failed with `Read timed out` and were skipped
+  outright** — the request had a fixed 30s timeout with no retry, so any
+  response slower than that (not uncommon on Gemini's free-tier models)
+  lost the word for the entire run instead of recovering. The timeout is
+  now 60s and a read timeout is retried (up to 3 times, same retry budget
+  the existing 429 handling already used) before the word is given up on.
+### Changed
+- **Annotation Mode's "basic" card type no longer shows the phrase/word
+  twice.** The front used to show a bare `Word` line stacked above the
+  full highlighted sentence, which was redundant (and, for a highlight
+  spanning most of a sentence, nearly duplicated text) — now the front is
+  just the highlighted sentence.
+- **Annotation Mode now has its own dedicated, minimal Anki note type**
+  instead of sharing Spontaneous Mode's general 11-field one — just Word,
+  Example phrase, Translation, and Word audio (+ a Cloze variant). No
+  Image field — Annotation Mode never has a GIF (see below). Own Anki
+  note-type ID range, so it can't collide with an already-imported
+  Spontaneous Mode note type. Already-generated cards don't need
+  regenerating — a fresh "Export decks" re-exports everything correctly
+  from the same underlying data; since it's a new note type, you'll
+  likely want to delete your old, broken-content Annotation Mode
+  cards/note-type in Anki after importing the corrected export.
+- **Annotation Mode's card is now deliberately minimal: the highlighted
+  phrase/word on the front, its translation on the back, nothing else.**
+  "Generate new cards" now shows a simple "Choose Content & Card Type"
+  step for Annotation Mode: a single "Include word pronunciation audio"
+  toggle and a Card type picker (Basic, Type-in-answer, or Cloze deletion
+  — Cloze only offered when Markdown extraction = Highlights, since it
+  needs real sentence context). The old 4-way content preset (which also
+  offered an image) is gone — Annotation Mode never fetches a GIF or asks
+  the AI for `gif_keywords` at all now. Spontaneous Mode is unaffected —
+  it keeps the full field checklist exactly as before. Annotation Mode's
+  "Translation" field also now asks the AI for a direct translation of
+  the phrase/word instead of a dictionary-style definition.
+- **Annotation Mode no longer routes cards into a category subdeck** —
+  only the `topic::<Category>` tag still applies; every Annotation Mode
+  card now lands in the root deck. Spontaneous Mode's subdeck routing is
+  unaffected. The "Category subdecks & tags" toggle is relabeled
+  "Category tags" while in Annotation Mode to match.
+- **Annotation Mode no longer deduplicates anything.** Every run now
+  re-reads the tracked markdown file(s) in full and generates one card
+  per highlight found — including exact repeats of a previous run's
+  cards, and repeats of the same word within one file (previously
+  collapsed to a single card). The database has no bearing on what counts
+  as "new" in this mode anymore; the previous per-file "already read"
+  tracking has been removed.
+- **Annotation Mode no longer caps a run at `WORDS_PER_RUN`.** Every
+  highlighted item/word found across the tracked markdown file(s) is now
+  processed in a single run instead of requiring repeated runs to work
+  through one document — `WORDS_PER_RUN` now only governs Spontaneous
+  Mode, and its setting row is hidden from Annotation Mode's Generation
+  Settings screen accordingly.
+- **The Pocket TTS voice picker now shows the language alongside each
+  voice name**, e.g. "Estelle(French)" instead of just "Estelle".
+- **Audio and GIF settings are trimmed to what's relevant per mode.**
+  Annotation Mode's Audio Settings screen hides the "Example sentence
+  audio"/"Meaning audio" toggles (that card has no such fields), and its
+  Configure menu drops the GIF row entirely (Annotation Mode never has a
+  GIF).
 
 ## [2.6.0] - 2026-08-15
 ### Changed

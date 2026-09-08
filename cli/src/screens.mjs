@@ -226,14 +226,20 @@ async function settingsLanguage(crumbs) {
   await runScreen({ title: 'Language Settings', breadcrumb: trail, summary: bannerSummary(), items });
 }
 
-async function settingsDeck(crumbs) {
+// mode: the active WORD_SOURCE value — Annotation Mode never routes cards
+// into a category subdeck (tags only, see CLAUDE.md § Category / subdeck
+// organization), so the category toggle's label is adjusted to match.
+async function settingsDeck(crumbs, mode) {
   const options = getOptions();
   const trail = [...crumbs, 'Deck & cards'];
+  const categoriesLabel = mode === 'markdown_notes' ? 'Category tags' : 'Category subdecks & tags';
   const items = [
     textItem('Deck name', 'DECK_NAME'),
     pickerItem('Card template', 'CARD_TEMPLATE', options.templates),
     textItem('Output — new deck', 'DECK_OUTPUT_NEW'),
     textItem('Output — full deck', 'DECK_OUTPUT_FULL'),
+    separatorItem(),
+    toggleItem(categoriesLabel, 'ENABLE_CATEGORIES'),
     separatorItem(),
     backItem(),
   ];
@@ -242,15 +248,20 @@ async function settingsDeck(crumbs) {
 
 // mode: the active WORD_SOURCE value ('markdown_notes' | 'frequency_list')
 // — which settings show below depends on it, mirroring main.py's
-// configure_generation(mode).
+// configure_generation(mode). 'Words per run' is Spontaneous-Mode-only —
+// Annotation Mode processes every new item found in a single run, no
+// per-run cap (see main.py's _do_generate()).
 async function settingsGeneration(crumbs, mode) {
   const options = getOptions();
   const trail = [...crumbs, 'Generation'];
-  const items = [
-    numberItem('Words per run', 'WORDS_PER_RUN', { minVal: 1, step: 5 }),
+  const items = [];
+  if (mode !== 'markdown_notes') {
+    items.push(numberItem('Words per run', 'WORDS_PER_RUN', { minVal: 1, step: 5 }));
+  }
+  items.push(
     numberItem('Total word pool', 'TOTAL_WORD_POOL', { minVal: 100, step: 100 }),
     separatorItem(),
-  ];
+  );
   if (mode === 'markdown_notes') {
     items.push(
       pickerItem('Markdown source mode', 'MARKDOWN_SOURCE_MODE', options.markdown_source_modes),
@@ -376,11 +387,49 @@ async function cardFieldsMenu(crumbs) {
   }
 }
 
+// Annotation Mode's generate-wizard step 2, replacing cardFieldsMenu() for
+// this mode. The card is fixed — highlighted phrase/word on the front,
+// translation on the back, nothing else (see CLAUDE.md § Annotation Mode
+// content presets) — so the only real choices left are whether to include
+// word-pronunciation audio and how the card tests you. Mirrors main.py's
+// configure_annotation_content(). Writes ANNOTATION_INCLUDE_AUDIO/
+// ANNOTATION_CARD_TYPE directly; never touches CARD_FIELDS_JSON. Returns
+// true if the user chose to continue, false if they backed/cancelled.
+async function annotationContentMenu(crumbs) {
+  const options = getOptions();
+  const trail = [...crumbs, 'Choose Content & Card Type'];
+  const cfg = getCfgStore().get();
+  const clozeOk = cfg.MARKDOWN_EXTRACTION_MODE === 'highlights';
+  const cardTypeOptions = clozeOk
+    ? options.annotation_card_types
+    : options.annotation_card_types.filter(([key]) => key !== 'cloze');
+
+  let proceed = false;
+  const items = [
+    toggleItem('Include word pronunciation audio', 'ANNOTATION_INCLUDE_AUDIO'),
+    pickerItem('Card type', 'ANNOTATION_CARD_TYPE', cardTypeOptions),
+    separatorItem(),
+    actionItem('Continue -> Generate', 'continue', 'Proceed with this content configuration'),
+    backItem('Cancel'),
+  ];
+  const choice = await runScreen({
+    title: 'Choose Content & Card Type', breadcrumb: trail, summary: bannerSummary(), items,
+  });
+  if (choice === 'continue') proceed = true;
+  return proceed;
+}
+
+// Each option's label is "<Voice>(<Language>)", e.g. "Estelle(French)" —
+// the language comes straight out of the Pocket TTS language id itself
+// (strip a trailing "_24l", title-case what's left), mirroring main.py's
+// _pocket_tts_voice_options().
 function pocketTtsVoiceOptions(langCode) {
   const options = getOptions();
   const pocketLang = options.pocket_tts_lang_map[langCode] || 'english';
   const voices = options.pocket_tts_voices[pocketLang] || options.pocket_tts_voices.english;
-  return voices.map((v) => [v, v.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())]);
+  const titleCase = (s) => s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  const langLabel = titleCase(pocketLang.replace(/_24l$/, ''));
+  return voices.map((v) => [v, `${titleCase(v)}(${langLabel})`]);
 }
 
 async function pocketTtsSettings(crumbs) {
@@ -397,7 +446,11 @@ async function pocketTtsSettings(crumbs) {
   await runScreen({ title: 'Pocket TTS Settings', breadcrumb: trail, summary: bannerSummary(), items });
 }
 
-async function settingsAudio(crumbs) {
+// mode: the active WORD_SOURCE value — Annotation Mode's note has no
+// example-sentence or meaning-audio field at all (front = highlighted
+// phrase, back = translation, see CLAUDE.md § Annotation Mode content
+// presets), so those two toggles are meaningless there and hidden.
+async function settingsAudio(crumbs, mode) {
   const options = getOptions();
   const trail = [...crumbs, 'Audio'];
   while (true) {
@@ -405,8 +458,14 @@ async function settingsAudio(crumbs) {
       toggleItem('Enable audio (master switch)', 'ENABLE_AUDIO'),
       separatorItem(),
       toggleItem('Word pronunciation audio', 'ENABLE_WORD_AUDIO'),
-      toggleItem('Example sentence audio', 'ENABLE_EXAMPLE_AUDIO'),
-      toggleItem('Meaning audio (native lang)', 'ENABLE_MEANING_AUDIO'),
+    ];
+    if (mode !== 'markdown_notes') {
+      items.push(
+        toggleItem('Example sentence audio', 'ENABLE_EXAMPLE_AUDIO'),
+        toggleItem('Meaning audio (native lang)', 'ENABLE_MEANING_AUDIO'),
+      );
+    }
+    items.push(
       separatorItem(),
       pickerItem('TTS provider', 'TTS_PROVIDER', options.tts_providers),
       actionItem('Pocket TTS settings', 'pocket_tts', () => {
@@ -415,7 +474,7 @@ async function settingsAudio(crumbs) {
       }),
       separatorItem(),
       backItem(),
-    ];
+    );
     const choice = await runScreen({ title: 'Audio Settings', breadcrumb: trail, summary: bannerSummary(), items });
     if (choice === undefined || choice === 'back') return;
     if (choice === 'pocket_tts') await pocketTtsSettings(trail);
@@ -454,7 +513,10 @@ async function settingsRateLimits(crumbs) {
 }
 
 // mode: the active WORD_SOURCE value — threaded through to
-// settingsGeneration() only, mirroring main.py's configure_main(mode).
+// settingsGeneration()/settingsDeck()/settingsAudio(), mirroring
+// main.py's configure_main(mode). The GIF row is dropped entirely for
+// Annotation Mode, which never has a GIF (see CLAUDE.md § Annotation
+// Mode content presets).
 async function settingsMain(crumbs, mode) {
   const trail = [...crumbs, 'Settings'];
   while (true) {
@@ -471,27 +533,33 @@ async function settingsMain(crumbs, mode) {
       actionItem('Deck & cards', 'deck', () => getCfgStore().get().CARD_TEMPLATE),
       actionItem('Generation', 'generation', () => {
         const c = getCfgStore().get();
-        return `${c.WORDS_PER_RUN}/run   pool ${c.TOTAL_WORD_POOL}`;
+        return mode === 'markdown_notes'
+          ? `pool ${c.TOTAL_WORD_POOL}`
+          : `${c.WORDS_PER_RUN}/run   pool ${c.TOTAL_WORD_POOL}`;
       }),
       actionItem('Audio', 'audio', () => (getCfgStore().get().ENABLE_AUDIO ? 'ON' : 'OFF')),
-      actionItem('GIF', 'gif', () => {
+    ];
+    if (mode !== 'markdown_notes') {
+      items.push(actionItem('GIF', 'gif', () => {
         const c = getCfgStore().get();
         return `${c.ENABLE_GIF ? 'ON' : 'OFF'}  |  rating: ${c.GIF_RATING}` + (giphyKeyMissing() ? '  ! key missing' : '');
-      }),
+      }));
+    }
+    items.push(
       actionItem('Rate limits', 'ratelimits', () => {
         const c = getCfgStore().get();
         return `AI ${c.DELAY_AI}s  Giphy ${c.DELAY_GIPHY}s  TTS ${c.DELAY_TTS}s`;
       }),
       separatorItem(),
       backItem('Back to main menu'),
-    ];
+    );
     const choice = await runScreen({ title: 'Configure Settings', breadcrumb: trail, summary: bannerSummary(), items });
     if (choice === undefined || choice === 'back') return;
     if (choice === 'language') await settingsLanguage(trail);
     else if (choice === 'ai') await settingsAi(trail);
-    else if (choice === 'deck') await settingsDeck(trail);
+    else if (choice === 'deck') await settingsDeck(trail, mode);
     else if (choice === 'generation') await settingsGeneration(trail, mode);
-    else if (choice === 'audio') await settingsAudio(trail);
+    else if (choice === 'audio') await settingsAudio(trail, mode);
     else if (choice === 'gif') await settingsGif(trail);
     else if (choice === 'ratelimits') await settingsRateLimits(trail);
   }
@@ -573,13 +641,18 @@ async function pickCreationMode() {
   return (choice === undefined || choice === 'back') ? null : choice;
 }
 
-// ── Generate wizard: field checklist -> generate (+ auto-export). Mode is
-// no longer picked here — it's the outer screen this lives under.
+// ── Generate wizard: content configuration -> generate (+ auto-export).
+// Mode is no longer picked here — it's the outer screen this lives under.
+// Annotation Mode gets the simplified preset/card-type picker; Spontaneous
+// Mode keeps the full field checklist — mirrors main.py's
+// run_generate_wizard().
 
 async function runGenerateWizard(crumbs) {
-  const proceed = await cardFieldsMenu(crumbs);
-  if (!proceed) return;
   const mode = getCfgStore().get().WORD_SOURCE;
+  const proceed = mode === 'markdown_notes'
+    ? await annotationContentMenu(crumbs)
+    : await cardFieldsMenu(crumbs);
+  if (!proceed) return;
   runSubprocess(() => bridge.generate(mode));   // _do_generate() now auto-exports at the end
 }
 
@@ -627,7 +700,7 @@ async function modeMainMenu(mode) {
   const crumbs = [`Main Menu — ${label}`];
   while (true) {
     const items = [
-      actionItem('Generate new cards', 'generate', 'Choose fields, then generate + export automatically'),
+      actionItem('Generate new cards', 'generate', 'Configure content, then generate + export automatically'),
       actionItem('Export decks', 'export', 'Rebuild a full backup .apkg under a chosen filename'),
       actionItem('Configure', 'configure', () => {
         const c = getCfgStore().get();

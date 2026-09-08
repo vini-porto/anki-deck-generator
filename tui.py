@@ -28,6 +28,35 @@ _CP = {
 _ctx = {'stdscr': None}
 
 
+def run_in_print_mode(func):
+    """Suspend curses, run a print-based function, restore curses
+    afterward — the same mechanism Action(print_mode=True) uses, factored
+    out so a caller that needs to mix a curses step (a run_menu() picker)
+    with a print-based step (e.g. _do_generate()) within one Action can
+    call each with the right thing active, instead of the whole Action
+    running under print_mode=True and forcing every run_menu() call
+    inside it to open its own extra nested curses.wrapper() session (a
+    second full initscr()/endwin() cycle) just to get curses back — which
+    left the terminal's key-escape-sequence state inconsistent enough
+    that arrow keys after returning to the parent menu could misnavigate
+    (a real, reported bug this fixes)."""
+    if _ctx['stdscr'] is None:
+        func()
+        return
+    stdscr = _ctx['stdscr']
+    stdscr.clear()
+    stdscr.refresh()
+    curses.endwin()
+    _ctx['stdscr'] = None
+    try:
+        func()
+    finally:
+        _ctx['stdscr'] = stdscr
+        stdscr.keypad(True)
+        _init_colors()
+        curses.curs_set(0)
+
+
 def _cp(name):
     return curses.color_pair(_CP[name])
 
@@ -317,23 +346,10 @@ class Action(MenuItem):
 
     def on_enter(self, win):
         if self.print_mode:
-            # Suspend curses, run print-based function, restore curses.
             # The function's return value is never useful here — curses is
             # torn down for the duration, so there's no menu loop above to
             # propagate a 'back' token to.
-            win.clear()
-            win.refresh()
-            curses.endwin()
-            saved = _ctx['stdscr']
-            _ctx['stdscr'] = None
-            try:
-                self.func()
-            finally:
-                _ctx['stdscr'] = saved
-                # Restore curses state after returning
-                saved.keypad(True)
-                _init_colors()
-                curses.curs_set(0)
+            run_in_print_mode(self.func)
             return None
         return self.func()
 

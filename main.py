@@ -34,6 +34,7 @@ import zlib
 import shutil
 import sqlite3
 import hashlib
+import uuid
 import requests
 import genanki
 from gtts import gTTS
@@ -578,6 +579,17 @@ MEANING_EXHAUSTIVENESS_SETTINGS = {
 # frequency-list word itself (Spontaneous Mode), never a prompt-requested
 # field. "pos"/"category" are requested unconditionally regardless of the
 # checklist (deck-routing/tagging infrastructure, same as before).
+# Annotation Mode's simplified content presets (see § below) relabel
+# text_meaning as "Translation" and want a direct translation of the
+# anchor, not a dictionary-style definition — _build_dynamic_prompt()
+# swaps this in for FIELD_PROMPT_SPECS["text_meaning"]["instruction"]
+# specifically when mode == "annotation". Spontaneous Mode is unaffected.
+_ANNOTATION_TRANSLATION_INSTRUCTION = (
+    "A direct, concise translation of the anchor phrase/word into {target_lang}, exactly as it is "
+    "used in the quoted sentence above — not a dictionary-style definition, just the natural "
+    "{target_lang} equivalent for this specific usage."
+)
+
 FIELD_PROMPT_SPECS = {
     "ipa": {
         "json_key": "ipa", "top_level": True,
@@ -763,15 +775,29 @@ def _gemini_throttle():
 
 def _gemini_post_with_retry(url, payload, max_retries=3):
     """POST to Gemini, retrying on 429 (rate limit) with the server's own
-    suggested backoff. Returns the final response, whatever its status —
-    the caller still has to handle non-200/non-429 outcomes."""
+    suggested backoff, and on a read timeout (Gemini's free-tier models can
+    occasionally take longer than the timeout to respond — a plain retry
+    recovers most of these instead of losing the word for the whole run,
+    which is what a bare 30s timeout with no retry was doing before). If
+    every retry also times out, the last timeout is re-raised and handled
+    by the caller's existing except-and-skip logic. Returns the final
+    response, whatever its status — the caller still has to handle
+    non-200/non-429 outcomes."""
     global _gemini_min_interval
     attempt = 0
     while True:
         _gemini_throttle()
-        resp = requests.post(
-            url, params={"key": config.GEMINI_API_KEY}, json=payload, timeout=30
-        )
+        try:
+            resp = requests.post(
+                url, params={"key": config.GEMINI_API_KEY}, json=payload, timeout=60
+            )
+        except requests.exceptions.Timeout:
+            if attempt >= max_retries:
+                raise
+            attempt += 1
+            print(col(f"    [Gemini] Read timed out — retrying "
+                       f"({attempt}/{max_retries})...", 'yellow'))
+            continue
         if resp.status_code != 429:
             return resp
         # Hitting 429 at all means the current pace is too fast for this
@@ -1025,10 +1051,13 @@ _INTERACTION_LABELS = {
 
 
 def load_card_fields():
-    """Decode config.CARD_FIELDS_JSON, merged over catalog defaults so a
-    missing/corrupt blob (fresh key on an old config.py, hand-edited JSON,
-    a future FIELD_CATALOG addition) always yields one complete, valid
-    entry per catalog field."""
+    """Spontaneous Mode only — decode config.CARD_FIELDS_JSON, merged over
+    catalog defaults so a missing/corrupt blob (fresh key on an old
+    config.py, hand-edited JSON, a future FIELD_CATALOG addition) always
+    yields one complete, valid entry per catalog field. Annotation Mode
+    never touches CARD_FIELDS_JSON — it has its own dedicated Model/
+    Note-building path (see _build_annotation_model(), build_notes(),
+    § Annotation Mode content presets)."""
     try:
         stored = {f["field"]: f for f in json.loads(getattr(config, "CARD_FIELDS_JSON", "") or "[]")}
     except (json.JSONDecodeError, TypeError, KeyError):
@@ -1060,7 +1089,10 @@ def _build_dynamic_prompt(mode, anchor, context_sentence, requested_fields, know
         spec = FIELD_PROMPT_SPECS.get(key)
         if not spec:
             continue
-        instruction = spec["instruction"].format(source_lang=config.SOURCE_LANG, target_lang=config.TARGET_LANG)
+        if key == "text_meaning" and mode == "annotation":
+            instruction = _ANNOTATION_TRANSLATION_INSTRUCTION.format(target_lang=config.TARGET_LANG)
+        else:
+            instruction = spec["instruction"].format(source_lang=config.SOURCE_LANG, target_lang=config.TARGET_LANG)
         if spec.get("top_level"):
             top_lines.append(f'  "{spec["json_key"]}": "{instruction}",')
         elif spec.get("is_list"):
@@ -1101,11 +1133,16 @@ def _build_dynamic_prompt(mode, anchor, context_sentence, requested_fields, know
 
 
 def _content_key(mode, anchor, context_sentence):
-    """Annotation Mode hashes anchor+sentence (the same word highlighted in
-    two different sentences is two distinct cards); Spontaneous Mode keys
-    on the bare word, same as the old word_meaning dedup."""
+    """Annotation Mode has no dedup at all by design (see CLAUDE.md
+    § Word sources) — a fresh uuid4 nonce is folded into the hash so every
+    call gets a unique key, meaning a re-processed highlight (even an
+    exact repeat of a previous run, or two occurrences of the same word in
+    one file) always inserts as a new row instead of being silently
+    dropped by the UNIQUE(creation_mode, content_key, meaning_id)
+    constraint. Spontaneous Mode keys on the bare word, same as the old
+    word_meaning dedup."""
     if mode == "annotation":
-        basis = f"{anchor.strip().lower()}::{(context_sentence or '').strip().lower()}"
+        basis = f"{anchor.strip().lower()}::{(context_sentence or '').strip().lower()}::{uuid.uuid4().hex}"
         return hashlib.md5(basis.encode("utf-8")).hexdigest(), anchor
     return anchor.strip().lower(), None
 
@@ -1381,22 +1418,107 @@ def _build_cloze_model(template, fields):
 
 
 # ─────────────────────────────────────────────
+#  Annotation Mode's own dedicated Model — a small, fixed field set
+#  (Word, Text_Example_Phrase, Text_Meaning, Sound_Word, + Cloze_Text for
+#  the cloze card type — no Image, GIFs are never used in this mode)
+#  instead of participating in Spontaneous Mode's general 11-field Model.
+#  Own MODEL_ID range
+#  (config.MODEL_ID + 20/+30) so it can never collide with — or be
+#  shadowed by — an already-imported Spontaneous Mode note type sharing
+#  config.MODEL_ID in the user's Anki collection. See CLAUDE.md
+#  § Annotation Mode content presets.
+# ─────────────────────────────────────────────
+
+_ANNOTATION_FIELD_NAMES       = ["Word", "Text_Example_Phrase", "Text_Meaning", "Sound_Word"]
+_ANNOTATION_CLOZE_FIELD_NAMES = ["Cloze_Text", "Word", "Text_Meaning", "Sound_Word"]
+
+
+def _effective_annotation_card_type():
+    """The single source of truth for the Cloze/extraction-mode fallback:
+    Cloze needs real sentence context, so it's only honored when
+    MARKDOWN_EXTRACTION_MODE == "highlights" — otherwise silently treated
+    as "basic". Used by _generate_loop(), export_decks()/build_notes(),
+    and configure_annotation_content()."""
+    card_type = getattr(config, "ANNOTATION_CARD_TYPE", "basic")
+    cloze_ok = config.MARKDOWN_EXTRACTION_MODE == "highlights"
+    return card_type if (card_type != "cloze" or cloze_ok) else "basic"
+
+
+def _build_annotation_model(template, card_type):
+    """Hand-written qfmt/afmt per card_type — only 3 exist, fixed layout,
+    no position/order picker for this mode — reusing the same
+    template.FIELD_HTML snippets every other mode already renders with.
+    No image field at all — Annotation Mode never has a GIF (see CLAUDE.md
+    § Annotation Mode content presets)."""
+    cloze = card_type == "cloze"
+    field_names = list(_ANNOTATION_CLOZE_FIELD_NAMES if cloze else _ANNOTATION_FIELD_NAMES)
+
+    audio_block = template.FIELD_HTML["audio_word"]
+
+    if cloze:
+        qfmt = "{{cloze:Cloze_Text}}"
+        afmt = "\n".join(["{{FrontSide}}<hr>", template.FIELD_HTML["text_meaning"], audio_block])
+    elif card_type == "type_in":
+        qfmt = "\n".join([template.FIELD_HTML["text_meaning"], "{{type:Word}}"])
+        afmt = "\n".join(["{{FrontSide}}<hr>", template.FIELD_HTML["text_example_phrase"], audio_block])
+    else:  # "basic"
+        # Just the highlighted phrase/word in context, not a redundant
+        # separate bare-Word line above it — Text_Example_Phrase already
+        # is "the phrase/word", via highlight_word()'s <span> (or the
+        # AI-generated fallback example when there's no note context).
+        qfmt = template.FIELD_HTML["text_example_phrase"]
+        afmt = "\n".join(["{{FrontSide}}<hr>", template.FIELD_HTML["text_meaning"], audio_block])
+
+    return genanki.Model(
+        config.MODEL_ID + (30 if cloze else 20),
+        f"{config.DECK_NAME} Annotation{' Cloze' if cloze else ''} Model",
+        fields=[{"name": n} for n in field_names],
+        templates=[{"name": "Card", "qfmt": qfmt, "afmt": afmt}],
+        css=template.CSS,
+        model_type=genanki.Model.CLOZE if cloze else genanki.Model.FRONT_BACK,
+    )
+
+
+# ─────────────────────────────────────────────
 #  .apkg builder
 # ─────────────────────────────────────────────
 
-def build_notes(cards, model, template, fields=None):
+def build_notes(cards, model, template, fields=None, card_type=None):
     """
     Convert database rows into genanki Note objects.
     Returns (notes, media, ids) where each entry in `notes` is a
     (category, Note) pair — `category` is '' for the root deck, or a
     study-block label the caller routes into a `<Deck>::<Category>` subdeck.
+
+    Annotation Mode (config.WORD_SOURCE == "markdown_notes") builds notes
+    for its own dedicated Model (see _build_annotation_model()) instead of
+    Spontaneous Mode's general 11-field one — `card_type` picks which
+    ("basic"/"type_in"/"cloze"), defaulting to
+    _effective_annotation_card_type(). `fields` is Spontaneous-Mode-only,
+    defaulting to load_card_fields().
+
+    Each branch below builds a {anki_field_name: value} dict and maps it
+    through the exact same field-name list the corresponding Model
+    (_build_annotation_model() / _build_standard_model() /
+    _build_cloze_model()) used to declare its fields — so the Model's
+    declared names and each Note's positional values can never drift
+    apart again (see CHANGELOG — this silent drift was a real bug that
+    shipped: audio/GIF/text landed in the wrong Anki field and rendered
+    as silent/invisible/misplaced).
     """
-    fields = fields or load_card_fields()
-    cloze = _cloze_active(fields)
+    annotation_mode = config.WORD_SOURCE == "markdown_notes"
     notes = []
     media = []
     ids   = []
-    needs_raw = getattr(template, "REQUIRES_RAW_IMAGE", False) and not cloze
+
+    if annotation_mode:
+        card_type = card_type or _effective_annotation_card_type()
+        cloze = card_type == "cloze"
+        field_names = _ANNOTATION_CLOZE_FIELD_NAMES if cloze else _ANNOTATION_FIELD_NAMES
+    else:
+        fields = fields or load_card_fields()
+        cloze = _cloze_active(fields)
+        needs_raw = getattr(template, "REQUIRES_RAW_IMAGE", False) and not cloze
 
     for row in cards:
         (word_label, ipa, text_meaning, text_example,
@@ -1404,7 +1526,17 @@ def build_notes(cards, model, template, fields=None):
          gif_url, gif_raw_url, gender_str, category, word, card_id) = row
         category = category.strip() if (category and config.ENABLE_CATEGORIES) else ""
 
-        if cloze:
+        if annotation_mode:
+            values = {
+                "Word":                word_label,
+                "Text_Example_Phrase": highlight_delimited(text_example),
+                "Text_Meaning":        text_meaning,
+                "Sound_Word":          sound_tag(aw) if config.ENABLE_WORD_AUDIO else "",
+            }
+            if cloze:
+                values["Cloze_Text"] = make_cloze_text(_strip_example_markup(text_example), word)
+            note_fields = [values[n] for n in field_names]
+        elif cloze:
             note_fields = [
                 make_cloze_text(_strip_example_markup(text_example), word),  # Cloze_Text
                 word_label,                                             # Word
@@ -1417,19 +1549,17 @@ def build_notes(cards, model, template, fields=None):
                 gender_badge(gender_str),                                # Gender
             ]
         else:
-            note_fields = [
-                word_label,
-                gif_url or "",
-                sound_tag(aw) if config.ENABLE_WORD_AUDIO    else "",
-                sound_tag(am) if config.ENABLE_MEANING_AUDIO else "",
-                sound_tag(ae) if config.ENABLE_EXAMPLE_AUDIO else "",
-                text_meaning,
-                highlight_delimited(text_example),
-                text_example_translation,
-                ipa,
-                gender_badge(gender_str),
-                format_synonyms(synonyms),
-            ]
+            field_values = {
+                "Word": word_label, "IPA": ipa, "Gender": gender_badge(gender_str),
+                "Image": gif_url or "", "Text_Meaning": text_meaning,
+                "Text_Example_Phrase": highlight_delimited(text_example),
+                "Text_Example_Translation": text_example_translation,
+                "Synonyms": format_synonyms(synonyms),
+                "Sound_Word": sound_tag(aw) if config.ENABLE_WORD_AUDIO else "",
+                "Sound_Meaning": sound_tag(am) if config.ENABLE_MEANING_AUDIO else "",
+                "Sound_Example": sound_tag(ae) if config.ENABLE_EXAMPLE_AUDIO else "",
+            }
+            note_fields = [field_values[c["anki_field"]] for c in FIELD_CATALOG]
             if needs_raw:
                 note_fields.append(gif_raw_url or "")
 
@@ -1438,7 +1568,12 @@ def build_notes(cards, model, template, fields=None):
         if category:
             tags.append(f"topic::{category_to_tag(category)}")
 
-        notes.append((category, genanki.Note(model=model, fields=note_fields, tags=tags)))
+        # Annotation Mode never routes into a category subdeck — tags
+        # only (see CLAUDE.md § Category / subdeck organization) — so the
+        # deck-routing category is forced to "" here regardless of what
+        # the tag above used.
+        deck_category = "" if annotation_mode else category
+        notes.append((deck_category, genanki.Note(model=model, fields=note_fields, tags=tags)))
         ids.append(card_id)
         for path in [aw, am, ae]:
             if path and os.path.exists(path):
@@ -1482,7 +1617,8 @@ def _warn_legacy_rows(conn):
     Anki before the upgrade are completely unaffected."""
     rows = conn.execute(
         "SELECT creation_mode, COUNT(*) FROM cards WHERE exported = 0 "
-        "AND creation_mode NOT IN ('standard', 'cloze') GROUP BY creation_mode"
+        "AND creation_mode NOT IN ('standard', 'cloze', 'annotation', 'annotation_cloze') "
+        "GROUP BY creation_mode"
     ).fetchall()
     if rows:
         total = sum(c for _, c in rows)
@@ -1510,16 +1646,24 @@ def export_decks(conn, template, filename=None):
     controlled by config.ENABLE_CATEGORIES.
     """
     _warn_legacy_rows(conn)
-    fields = load_card_fields()
-    cloze = _cloze_active(fields)
-    mode = "cloze" if cloze else "standard"
-    model = build_anki_model(template, fields)
+    annotation_mode = config.WORD_SOURCE == "markdown_notes"
+    if annotation_mode:
+        card_type = _effective_annotation_card_type()
+        mode = "annotation_cloze" if card_type == "cloze" else "annotation"
+        model = _build_annotation_model(template, card_type)
+        fields = None
+    else:
+        card_type = None
+        fields = load_card_fields()
+        cloze = _cloze_active(fields)
+        mode = "cloze" if cloze else "standard"
+        model = build_anki_model(template, fields)
 
     def _collect(new_only):
         cards = get_all_cards(conn, new_only=new_only, creation_mode=mode)
         if not cards:
             return [], [], []
-        return build_notes(cards, model, template, fields)
+        return build_notes(cards, model, template, fields=fields, card_type=card_type)
 
     if filename:
         notes, media, _ids = _collect(new_only=False)
@@ -1738,6 +1882,12 @@ _MARKDOWN_SOURCE_MODE_OPTIONS = [
     ("file",   "Single .md file"),
 ]
 
+_ANNOTATION_CARD_TYPE_OPTIONS = [
+    ("basic",   "Basic — reveal the translation"),
+    ("type_in", "Type-in-answer — type the phrase/word to flip the card"),
+    ("cloze",   "Cloze deletion — blank the phrase/word in its sentence"),
+]
+
 
 def _options_snapshot():
     """Static picker option lists, as JSON, for alternative frontends
@@ -1761,6 +1911,7 @@ def _options_snapshot():
         "word_sources":         _WORD_SOURCE_OPTIONS,
         "markdown_extraction_modes": _MARKDOWN_EXTRACTION_OPTIONS,
         "markdown_source_modes": _MARKDOWN_SOURCE_MODE_OPTIONS,
+        "annotation_card_types": _ANNOTATION_CARD_TYPE_OPTIONS,
     }
 
 
@@ -1906,7 +2057,15 @@ def configure_ai():
     ])
 
 
-def configure_deck():
+def configure_deck(mode):
+    """mode: the active WORD_SOURCE value — Annotation Mode never routes
+    cards into a category subdeck (tags only, see CLAUDE.md § Category /
+    subdeck organization), so the ENABLE_CATEGORIES toggle's label/hint is
+    adjusted to match what actually happens for that mode."""
+    categories_label = 'Category tags' if mode == 'markdown_notes' else 'Category subdecks & tags'
+    categories_hint = ('Files cards with a topic:: tag (no subdecks in Annotation Mode)'
+                        if mode == 'markdown_notes' else
+                        'Files cards like "Phrasal Verbs" into <Deck>::<Category> + topic:: tag')
     _tui.run_menu('Deck & Card Settings', [
         _tui.TextInput('Deck name',          'DECK_NAME',
                        hint='Name shown inside Anki — avoid changing after first import'),
@@ -1916,8 +2075,7 @@ def configure_deck():
         _tui.TextInput('Output — full deck', 'DECK_OUTPUT_FULL',
                        hint='.apkg full backup file'),
         _tui.Separator(),
-        _tui.Toggle('Category subdecks & tags', 'ENABLE_CATEGORIES',
-                    hint='Files cards like "Phrasal Verbs" into <Deck>::<Category> + topic:: tag'),
+        _tui.Toggle(categories_label, 'ENABLE_CATEGORIES', hint=categories_hint),
         _tui.Separator(),
         _tui.Back(),
     ])
@@ -1928,11 +2086,17 @@ def configure_generation(mode):
     see _pick_creation_mode()/main()) — which settings are shown below
     depends on which one is active, since Meaning exhaustiveness only
     means anything for AI-invented content and the Markdown settings only
-    mean anything when reading from notes."""
-    items = [
-        _tui.NumberInput('Words per run',   'WORDS_PER_RUN',
-                         hint='Words processed each time the script runs',
-                         min_val=1, step=5),
+    mean anything when reading from notes. 'Words per run' is likewise
+    Spontaneous-Mode-only now — Annotation Mode processes every new item
+    found in a single run, no per-run cap (see _do_generate())."""
+    items = []
+    if mode != 'markdown_notes':
+        items.append(
+            _tui.NumberInput('Words per run',   'WORDS_PER_RUN',
+                             hint='Words processed each time the script runs',
+                             min_val=1, step=5)
+        )
+    items += [
         _tui.NumberInput('Total word pool', 'TOTAL_WORD_POOL',
                          hint='Size of frequency list to draw from',
                          min_val=100, step=100),
@@ -2065,10 +2229,48 @@ def configure_card_fields():
     return proceed['go']
 
 
+def configure_annotation_content():
+    """Annotation Mode's generate-wizard step 2, replacing
+    configure_card_fields() for this mode. Annotation Mode's card is fixed
+    — the highlighted phrase/word (in its sentence) on the front, its
+    translation on the back, nothing else — so the only real choices left
+    are whether to include word-pronunciation audio and how the card
+    tests you (see CLAUDE.md § Annotation Mode content presets). Writes
+    ANNOTATION_INCLUDE_AUDIO/ANNOTATION_CARD_TYPE directly; never touches
+    CARD_FIELDS_JSON. Returns True if the user chose to continue, False if
+    they backed/cancelled."""
+    proceed = {'go': False}
+
+    def _continue():
+        proceed['go'] = True
+        return 'back'
+
+    cloze_ok = config.MARKDOWN_EXTRACTION_MODE == 'highlights'
+    card_type_options = _ANNOTATION_CARD_TYPE_OPTIONS if cloze_ok else \
+        [o for o in _ANNOTATION_CARD_TYPE_OPTIONS if o[0] != 'cloze']
+    card_type_hint = 'How the card tests you' if cloze_ok else \
+        'How the card tests you (Cloze needs Markdown extraction = Highlights)'
+
+    _tui.run_menu('Choose Content & Card Type', [
+        _tui.Toggle('Include word pronunciation audio', 'ANNOTATION_INCLUDE_AUDIO'),
+        _tui.Picker('Card type', 'ANNOTATION_CARD_TYPE', card_type_options, hint=card_type_hint),
+        _tui.Separator(),
+        _tui.Action('Continue -> Generate', _continue, 'Proceed with this content configuration'),
+        _tui.Back('Cancel'),
+    ])
+    return proceed['go']
+
+
 def _pocket_tts_voice_options(lang_code):
+    """Each option's label is "<Voice>(<Language>)", e.g. "Estelle(French)"
+    — the language comes straight out of the Pocket TTS language id itself
+    (strip a trailing "_24l", title-case what's left), no separate display
+    name table needed since all 6 POCKET_TTS_LANG_MAP values already fit
+    this transform."""
     pocket_lang = POCKET_TTS_LANG_MAP.get(lang_code, "english")
     voices      = POCKET_TTS_VOICES.get(pocket_lang, POCKET_TTS_VOICES["english"])
-    return [(v, v.replace("_", " ").title()) for v in voices]
+    lang_label  = pocket_lang.removesuffix("_24l").title()
+    return [(v, f"{v.replace('_', ' ').title()}({lang_label})") for v in voices]
 
 
 def configure_pocket_tts():
@@ -2087,13 +2289,22 @@ def configure_pocket_tts():
     ])
 
 
-def configure_audio():
-    _tui.run_menu('Audio Settings', [
+def configure_audio(mode):
+    """mode: the active WORD_SOURCE value — Annotation Mode's note has no
+    example-sentence or meaning-audio field at all (front = highlighted
+    phrase, back = translation, see CLAUDE.md § Annotation Mode content
+    presets), so those two toggles are meaningless there and hidden."""
+    items = [
         _tui.Toggle('Enable audio (master switch)', 'ENABLE_AUDIO'),
         _tui.Separator(),
         _tui.Toggle('Word pronunciation audio',     'ENABLE_WORD_AUDIO'),
-        _tui.Toggle('Example sentence audio',       'ENABLE_EXAMPLE_AUDIO'),
-        _tui.Toggle('Meaning audio (native lang)',  'ENABLE_MEANING_AUDIO'),
+    ]
+    if mode != 'markdown_notes':
+        items += [
+            _tui.Toggle('Example sentence audio',      'ENABLE_EXAMPLE_AUDIO'),
+            _tui.Toggle('Meaning audio (native lang)', 'ENABLE_MEANING_AUDIO'),
+        ]
+    items += [
         _tui.Separator(),
         _tui.Picker('TTS provider', 'TTS_PROVIDER', _TTS_PROVIDERS),
         _tui.Action('Pocket TTS settings',
@@ -2102,7 +2313,8 @@ def configure_audio():
                              if current_tts_provider() == 'pocket_tts' else 'n/a — gTTS selected')),
         _tui.Separator(),
         _tui.Back(),
-    ])
+    ]
+    _tui.run_menu('Audio Settings', items)
 
 
 def configure_gif():
@@ -2129,9 +2341,11 @@ def configure_ratelimits():
 
 def configure_main(mode):
     """mode: the active WORD_SOURCE value — threaded through to
-    configure_generation() only, which is the one screen whose contents
-    depend on it (see its docstring)."""
-    _tui.run_menu('Configure Settings', [
+    configure_generation()/configure_deck()/configure_audio(), the screens
+    whose contents depend on it (see their docstrings). The GIF row is
+    dropped entirely for Annotation Mode, which never has a GIF (see
+    CLAUDE.md § Annotation Mode content presets)."""
+    items = [
         _tui.Action('Language',
                     configure_language,
                     lambda: f'{config.SOURCE_LANG.upper()} -> {config.TARGET_LANG}'),
@@ -2140,24 +2354,31 @@ def configure_main(mode):
                     lambda: (f'{AI_PROVIDER_LABELS.get(current_ai_provider(), current_ai_provider())}'
                              + ('' if not ai_key_missing() else '  ! key missing'))),
         _tui.Action('Deck & cards',
-                    configure_deck,
+                    lambda: configure_deck(mode),
                     lambda: config.CARD_TEMPLATE),
         _tui.Action('Generation',
                     lambda: configure_generation(mode),
-                    lambda: f'{config.WORDS_PER_RUN}/run   pool {config.TOTAL_WORD_POOL}'),
+                    lambda: (f'pool {config.TOTAL_WORD_POOL}' if mode == 'markdown_notes'
+                             else f'{config.WORDS_PER_RUN}/run   pool {config.TOTAL_WORD_POOL}')),
         _tui.Action('Audio',
-                    configure_audio,
+                    lambda: configure_audio(mode),
                     lambda: 'ON' if config.ENABLE_AUDIO else 'OFF'),
-        _tui.Action('GIF',
-                    configure_gif,
-                    lambda: (f'{"ON" if config.ENABLE_GIF else "OFF"}  |  rating: {config.GIF_RATING}'
-                             + ('' if not giphy_key_missing() else '  ! key missing'))),
+    ]
+    if mode != 'markdown_notes':
+        items.append(
+            _tui.Action('GIF',
+                        configure_gif,
+                        lambda: (f'{"ON" if config.ENABLE_GIF else "OFF"}  |  rating: {config.GIF_RATING}'
+                                 + ('' if not giphy_key_missing() else '  ! key missing'))),
+        )
+    items += [
         _tui.Action('Rate limits',
                     configure_ratelimits,
                     lambda: f'AI {config.DELAY_AI}s  Giphy {config.DELAY_GIPHY}s  TTS {config.DELAY_TTS}s'),
         _tui.Separator(),
         _tui.Back('Back to main menu'),
-    ])
+    ]
+    _tui.run_menu('Configure Settings', items)
 
 
 # ─────────────────────────────────────────────
@@ -2171,7 +2392,9 @@ _MD_EMBED_RE       = re.compile(r'!\[\[([^\]|]+)(?:\|[^\]]*)?\]\]')
 _MD_WIKILINK_RE    = re.compile(r'\[\[([^\]|]+)(?:\|([^\]]*))?\]\]')
 _MD_LINK_RE        = re.compile(r'\[([^\]]*)\]\([^)]*\)')
 _MD_HEADING_RE     = re.compile(r'^#{1,6}\s+', re.MULTILINE)
+_MD_HEADING_LINE_RE = re.compile(r'^#{1,6}[ \t]+(.*)$', re.MULTILINE)
 _MD_HIGHLIGHT_RE   = re.compile(r'==(.+?)==', re.DOTALL)
+_MD_LEADING_BULLET_RE = re.compile(r'^[ \t]*(?:[-*+]|\d+\.)[ \t]+')
 _MD_WORD_RE        = re.compile(r'\b[^\W\d_]{2,}\b', re.UNICODE)
 
 
@@ -2186,40 +2409,97 @@ def _iter_markdown_files(root):
     return sorted(paths)
 
 
-def _strip_markdown_noise(text):
+def _strip_markdown_noise(text, strip_headings=True):
     """Lightweight regex cleanup — strips YAML frontmatter, code, and
-    link/embed/heading syntax while keeping their visible display text."""
+    link/embed/heading syntax while keeping their visible display text.
+    strip_headings=False leaves heading markup ("#"/"##"/...) in place —
+    used by the "highlights" extraction path, which needs to detect
+    heading *positions* itself (see _extract_highlights_with_context())
+    to recognize a "### word" heading directly labeling a following
+    highlighted example, and to keep a heading from bleeding into an
+    adjacent highlight's sentence-context walk otherwise."""
     text = _MD_FRONTMATTER_RE.sub('', text)
     text = _MD_CODE_FENCE_RE.sub(' ', text)
     text = _MD_INLINE_CODE_RE.sub(' ', text)
     text = _MD_EMBED_RE.sub(r'\1', text)
     text = _MD_WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)
     text = _MD_LINK_RE.sub(r'\1', text)
-    text = _MD_HEADING_RE.sub('', text)
+    if strip_headings:
+        text = _MD_HEADING_RE.sub('', text)
     return text
 
 
 def _extract_highlights_with_context(text):
     """Return [(highlight, sentence_context), ...] in file order — the
     highlighted span itself, and the sentence it sits in (markers
-    stripped back out). Annotation Mode uses these directly as the literal
-    Word / Text_Example_Phrase content instead of asking the AI to invent
-    them (see § Word sources / § Card fields in CLAUDE.md). Sentence
-    boundaries are found with a simple nearest-punctuation/paragraph-break
-    walk — naive on abbreviations, decimals, quoted dialogue, and
-    non-Latin punctuation; a known, documented limitation, not a parser."""
+    stripped back out). The highlighted span is always the anchor,
+    verbatim — never substituted by a nearby heading (an earlier version
+    of this function swapped a directly-labeling "### word" heading's raw
+    text in as the anchor instead; that produced a garbled anchor whenever
+    the heading held more than a bare word — e.g. a personal-note
+    convention like "### word */ipa/*" — which then confused the AI's
+    translation (the "anchor" it was told to translate didn't actually
+    appear in the quoted sentence, so it improvised inconsistently) and
+    put that raw heading text on the card itself; a real, reported case,
+    fixed by removing the swap outright rather than special-casing
+    heading formats). Annotation Mode uses the anchor/context pair
+    directly as the literal Word / Text_Example_Phrase content instead of
+    asking the AI to invent them (see § Word sources / § Card fields in
+    CLAUDE.md). Sentence boundaries are found with a simple nearest-
+    punctuation/paragraph-break walk — naive on abbreviations, decimals,
+    quoted dialogue, and non-Latin punctuation; a known, documented
+    limitation, not a parser.
+
+    `text` must still have heading markup intact (call
+    _strip_markdown_noise(raw, strip_headings=False)) — a heading line is
+    a hard boundary for the sentence-context walk below: without it, a
+    heading with no sentence-ending punctuation after it would bleed its
+    own text into a following highlight's "sentence".
+
+    The window is separately also clamped so it never crosses into a
+    NEIGHBORING highlight's own `==...==` span — without this, two
+    highlights close together with no sentence-ending punctuation between
+    them (a compact vocabulary-list note, one highlight per line) would
+    each swallow the other's raw markup into their "sentence", producing
+    identical bloated contexts for both cards and, when the window cut
+    through the middle of a highlight's markers instead of the whole
+    thing, a dangling literal `==` that never got substituted back out."""
+    headings = [(hm.start(), hm.end(), hm.group(1).strip()) for hm in _MD_HEADING_LINE_RE.finditer(text)]
+    matches = list(_MD_HIGHLIGHT_RE.finditer(text))
     results = []
-    for m in _MD_HIGHLIGHT_RE.finditer(text):
+    for idx, m in enumerate(matches):
         start_span, end_span = m.span()
+
         left_candidates = [text.rfind(p, 0, start_span) for p in '.!?']
         left_candidates.append(text.rfind('\n\n', 0, start_span))
         left = max(left_candidates)
+        if idx > 0:
+            left = max(left, matches[idx - 1].span()[1] - 1)
+        prior_heading_ends = [h_end for h_start, h_end, h_text in headings if h_end <= start_span]
+        if prior_heading_ends:
+            left = max(left, max(prior_heading_ends) - 1)
+
         right_candidates = [c for c in (text.find(p, end_span) for p in '.!?') if c != -1]
         para_break = text.find('\n\n', end_span)
         if para_break != -1:
             right_candidates.append(para_break)
         end = (min(right_candidates) + 1) if right_candidates else len(text)
+        if idx + 1 < len(matches):
+            end = min(end, matches[idx + 1].span()[0])
+        next_heading_starts = [h_start for h_start, h_end, h_text in headings if h_start >= end_span]
+        if next_heading_starts:
+            end = min(end, min(next_heading_starts))
+
         sentence = _MD_HIGHLIGHT_RE.sub(r'\1', text[left + 1:end]).strip()
+        # A highlight is almost always written as a list item
+        # ("- ==word==") — the boundary walk's left edge lands right
+        # after the previous punctuation/heading, which is the bullet
+        # marker itself, so it would otherwise leak a literal "- " onto
+        # the front of the card. Strip only a single leading bullet/
+        # ordinal marker, not arbitrary leading punctuation, so a
+        # sentence that genuinely starts with e.g. a bare hyphen-prefixed
+        # word isn't touched (the marker must be followed by whitespace).
+        sentence = _MD_LEADING_BULLET_RE.sub('', sentence).strip()
         highlight = m.group(1).strip()
         if highlight:
             results.append((highlight, sentence))
@@ -2238,76 +2518,28 @@ WORD_SOURCES = {
 
 def get_word_pool():
     """Dispatch to the active config.WORD_SOURCE's pool builder.
-    markdown_notes bypasses this entirely — see _build_markdown_pending()
-    and get_pending_words(), since that source needs DB access
-    (per-file diffing) that a zero-arg pool builder can't provide."""
+    markdown_notes bypasses this entirely — see _build_markdown_pending(),
+    since that source reads from files, not a zero-arg word list."""
     source = getattr(config, 'WORD_SOURCE', 'frequency_list')
     return WORD_SOURCES.get(source, WORD_SOURCES['frequency_list'])()
 
 
-def _markdown_file_key(path, root, source_mode):
-    """Stable identity for a tracked markdown file: path relative to
-    MARKDOWN_NOTES_PATH in folder mode (so same-named files in different
-    subfolders are tracked independently), or the bare filename in file
-    mode (only one file exists, nothing to disambiguate)."""
-    if source_mode == 'file':
-        return os.path.basename(path)
-    return os.path.relpath(path, root)
-
-
-def _dedup_ordered_ci_with_context(items):
-    """First-seen order, case-insensitive dedup over (item, context) pairs —
-    the same rule the old highlights pool builder used, now reused by the
-    per-file diff, keeping whichever context the item's first occurrence
-    was found in."""
-    seen, ordered = set(), []
-    for item, context in items:
-        key = item.lower()
-        if key not in seen:
-            seen.add(key)
-            ordered.append((item, context))
-    return ordered
-
-
-def get_markdown_file_state(conn, creation_mode, file_key):
-    """Stored (file_size, baseline_items) for a tracked file in this
-    creation_mode. file_size is None if the file's baseline has never
-    fully converged with its on-disk content (see _build_markdown_pending's
-    docstring) or if the file has never been seen before."""
-    row = conn.execute(
-        "SELECT file_size, items_json FROM markdown_file_state WHERE creation_mode=? AND file_key=?",
-        (creation_mode, file_key)
-    ).fetchone()
-    if not row:
-        return None, set()
-    size, items_json = row
-    return size, set(json.loads(items_json))
-
-
 def _build_markdown_pending(conn, creation_mode):
-    """Per-file diff against markdown_file_state, for
-    WORD_SOURCE = "markdown_notes". Unlike the frequency-list source,
-    dedup here is per-file, not per-word: a file whose on-disk size still
-    matches its stored baseline is skipped outright (untouched since last
-    full read); otherwise it's re-extracted and only items not already in
-    its stored baseline are treated as new — repeats of the same word/
-    highlight across different files are NOT filtered here (the existing
-    UNIQUE(creation_mode, content_key, meaning_id) constraint + card_exists()
-    check in _generate_loop is what actually prevents a duplicate card).
+    """Every highlight/word currently in the tracked file(s) — Annotation
+    Mode has no dedup at all by design (see CLAUDE.md § Word sources): the
+    database has no bearing on what counts as "new" here, so every run
+    re-reads every tracked file in full and returns every occurrence
+    found, including exact repeats of a previous run's cards or of each
+    other within one file. `conn`/`creation_mode` are accepted only for
+    call-site symmetry with the rest of this module — nothing here reads
+    or writes the database.
 
-    Returns (pending, item_sources, file_snapshot):
-      - pending: deduped, order-preserved list of (item, context) pairs
-        (context is the sentence the item was found in, for highlights
-        mode; None for all_words mode), capped at config.TOTAL_WORD_POOL
-      - item_sources: {item: {file_key, ...}} — which changed file(s)
-        contributed each pending item
-      - file_snapshot: {file_key: {"size", "current_items"}} for every
-        file that was actually re-diffed this run (files skipped via the
-        size shortcut are absent — nothing changed, nothing to commit)
-
-    _commit_markdown_file_state() uses item_sources/file_snapshot, together
-    with which words _generate_loop actually confirmed, to update baselines
-    after the run."""
+    Returns (pending, files_scanned):
+      - pending: order-preserved list of (item, context) pairs (context is
+        the sentence the item was found in, for highlights mode; None for
+        all_words mode), capped at config.TOTAL_WORD_POOL as a safety
+        valve (unrelated to dedup — there simply isn't any here)
+      - files_scanned: how many files were read, for the run summary"""
     root = getattr(config, 'MARKDOWN_NOTES_PATH', '')
     source_mode = getattr(config, 'MARKDOWN_SOURCE_MODE', 'folder')
     extraction_mode = getattr(config, 'MARKDOWN_EXTRACTION_MODE', 'highlights')
@@ -2315,93 +2547,28 @@ def _build_markdown_pending(conn, creation_mode):
     if source_mode == 'file':
         if not root or not os.path.isfile(root) or not root.lower().endswith('.md'):
             print(col(f'  [WARN] MARKDOWN_NOTES_PATH "{root}" is not a valid .md file — word pool is empty.', 'yellow'))
-            return [], {}, {}
+            return [], 0
         paths = [root]
     else:
         if not root or not os.path.isdir(root):
             print(col(f'  [WARN] MARKDOWN_NOTES_PATH "{root}" is not a valid folder — word pool is empty.', 'yellow'))
-            return [], {}, {}
+            return [], 0
         paths = _iter_markdown_files(root)
 
-    pending, pending_seen = [], set()
-    item_sources = {}
-    file_snapshot = {}
+    pending = []
 
     for path in paths:
-        try:
-            size = os.path.getsize(path)
-        except OSError:
-            continue
-        file_key = _markdown_file_key(path, root, source_mode)
-        stored_size, baseline_items = get_markdown_file_state(conn, creation_mode, file_key)
-
-        if stored_size is not None and stored_size == size:
-            continue  # unchanged since last full convergence
-
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 raw = f.read()
         except OSError:
             continue
-        cleaned = _strip_markdown_noise(raw)
+        cleaned = _strip_markdown_noise(raw, strip_headings=(extraction_mode != 'highlights'))
         raw_items = (_extract_highlights_with_context(cleaned) if extraction_mode == 'highlights'
                      else [(w, None) for w in _extract_all_words(cleaned)])
-        current_ordered = _dedup_ordered_ci_with_context(raw_items)
-        current_set = ({item.lower() for item, _ in current_ordered} if extraction_mode == 'highlights'
-                        else {item for item, _ in current_ordered})
+        pending.extend(raw_items)
 
-        file_snapshot[file_key] = {"size": size, "current_items": current_set}
-
-        for item, context in current_ordered:
-            key = item.lower() if extraction_mode == 'highlights' else item
-            if key in baseline_items:
-                continue
-            item_sources.setdefault(item, set()).add(file_key)
-            if item not in pending_seen:
-                pending_seen.add(item)
-                pending.append((item, context))
-
-    return pending[:config.TOTAL_WORD_POOL], item_sources, file_snapshot
-
-
-def _commit_markdown_file_state(conn, creation_mode, file_snapshot, item_sources, confirmed_words):
-    """Persist each re-diffed file's new baseline after _generate_loop has
-    run. Only items _generate_loop actually confirmed (AI succeeded, at
-    least one item returned) enter the baseline — an item whose AI call
-    failed is deliberately left out so it's retried next run, same
-    guarantee the word-level path already gives (see _generate_loop's
-    on_word_done). file_size is only advanced to the file's current
-    on-disk size when the baseline fully converges with its current
-    content; otherwise it's left NULL so a WORDS_PER_RUN-truncated file
-    doesn't get wrongly skipped by the size shortcut next run."""
-    highlights = getattr(config, 'MARKDOWN_EXTRACTION_MODE', 'highlights') == 'highlights'
-    for file_key, snap in file_snapshot.items():
-        stored_size, baseline_items = get_markdown_file_state(conn, creation_mode, file_key)
-        newly_confirmed = {
-            (item.lower() if highlights else item)
-            for item, sources in item_sources.items()
-            if file_key in sources and item in confirmed_words
-        }
-        new_baseline = (baseline_items | newly_confirmed) & snap["current_items"]
-        converged = new_baseline == snap["current_items"]
-        new_size = snap["size"] if converged else None
-        existing = conn.execute(
-            "SELECT id FROM markdown_file_state WHERE creation_mode=? AND file_key=?",
-            (creation_mode, file_key)
-        ).fetchone()
-        if existing:
-            conn.execute(
-                "UPDATE markdown_file_state SET file_size=?, items_json=?, date_updated=datetime('now') "
-                "WHERE creation_mode=? AND file_key=?",
-                (new_size, json.dumps(sorted(new_baseline)), creation_mode, file_key)
-            )
-        else:
-            conn.execute(
-                "INSERT INTO markdown_file_state (creation_mode, file_key, file_size, items_json) "
-                "VALUES (?, ?, ?, ?)",
-                (creation_mode, file_key, new_size, json.dumps(sorted(new_baseline)))
-            )
-    conn.commit()
+    return pending[:config.TOTAL_WORD_POOL], len(paths)
 
 
 # ─────────────────────────────────────────────
@@ -2458,9 +2625,9 @@ def _do_generate(conn):
     mode          = "annotation" if markdown_mode else "spontaneous"
 
     if markdown_mode:
-        pending, item_sources, file_snapshot = _build_markdown_pending(conn, "annotation")
-        print(f'\n  Files scanned : {col(str(len(file_snapshot)), "yellow")}')
-        print(f'  New items     : {col(str(len(pending)), "cyan")}')
+        pending, files_scanned = _build_markdown_pending(conn, "annotation")
+        print(f'\n  Files scanned    : {col(str(files_scanned), "yellow")}')
+        print(f'  Highlights found : {col(str(len(pending)), "cyan")}')
     else:
         all_words = get_word_pool()
         processed = get_processed_words(conn, target_mode)
@@ -2468,22 +2635,26 @@ def _do_generate(conn):
         print(f'\n  Word pool   : {col(str(len(all_words)), "yellow")}')
         print(f'  In database : {col(str(len(processed)), "green")}')
         print(f'  Pending     : {col(str(len(pending)), "cyan")}')
-    print(f'  This run    : {col(f"up to {config.WORDS_PER_RUN} words", "yellow")}')
+    if markdown_mode:
+        print(f'  This run         : {col(f"all {len(pending)} highlights", "yellow")}')
+    else:
+        print(f'  This run    : {col(f"up to {config.WORDS_PER_RUN} words", "yellow")}')
     print()
 
     changes_before = conn.total_changes
 
     if not pending:
         if markdown_mode:
-            print(col('  [INFO] No new content found in tracked files.', 'yellow'))
+            print(col('  [INFO] No highlights found in tracked files.', 'yellow'))
         else:
             print(col('  [WARN] Word pool exhausted!', 'yellow'))
             print(f'  Increase TOTAL_WORD_POOL in config.py (currently {config.TOTAL_WORD_POOL}).')
     elif markdown_mode:
-        confirmed_words = set()
-        _generate_loop(conn, pending, config.WORDS_PER_RUN, mode,
-                        on_word_done=lambda w, ok: confirmed_words.add(w) if ok else None)
-        _commit_markdown_file_state(conn, "annotation", file_snapshot, item_sources, confirmed_words)
+        # No WORDS_PER_RUN cap here — a document's highlight set is finite
+        # and user-authored, not an endless pool, so every highlight found
+        # this run is processed in one pass (unlike Spontaneous Mode,
+        # which paces itself against an effectively infinite word list).
+        _generate_loop(conn, pending, len(pending), mode)
     else:
         _generate_loop(conn, pending, config.WORDS_PER_RUN, mode)
 
@@ -2501,14 +2672,29 @@ def _do_generate(conn):
 
 
 def run_generate_wizard(conn):
-    """Field checklist -> generate (+ auto-export). The mode (Annotation/
-    Spontaneous) is no longer picked here — it's the outer screen this
-    action lives under (see _mode_main_menu()/main()), which has already
-    set config.WORD_SOURCE for this session."""
-    if not configure_card_fields():
+    """Content configuration -> generate (+ auto-export). The mode
+    (Annotation/Spontaneous) is no longer picked here — it's the outer
+    screen this action lives under (see _mode_main_menu()/main()), which
+    has already set config.WORD_SOURCE for this session. Annotation Mode
+    gets the simplified preset/card-type picker; Spontaneous Mode keeps
+    the full field checklist.
+
+    Deliberately NOT wrapped in an Action(print_mode=True) at the call
+    site — this step is curses-based (a run_menu() picker) while
+    _do_generate() is print-based, and tearing curses down for the whole
+    Action would force the picker's own run_menu() call to open a second,
+    fully-nested curses.wrapper() session just to get curses back. That
+    double init/teardown cycle left the terminal's arrow-key escape-
+    sequence state inconsistent enough to misnavigate after returning to
+    the parent menu (a real, reported bug). Instead: run the picker while
+    curses is still the parent's own live window (the normal nested-reuse
+    path in _tui.run_menu()), then suspend curses only around the
+    print-based step via _tui.run_in_print_mode()."""
+    proceed = (configure_annotation_content() if config.WORD_SOURCE == 'markdown_notes'
+               else configure_card_fields())
+    if not proceed:
         return
-    _do_generate(conn)
-    pause()
+    _tui.run_in_print_mode(lambda: (_do_generate(conn), pause()))
 
 
 def _do_export(conn, filename=None):
@@ -2552,28 +2738,33 @@ def run_export(conn):
     pause()
 
 
-def _generate_loop(conn, pending, limit, mode, on_word_done=None):
+def _generate_loop(conn, pending, limit, mode):
     """Core word-processing loop used by both interactive and headless modes.
     pending: list of (anchor, context) pairs — context is the literal
     sentence an Annotation Mode highlight was found in (None for
     Spontaneous Mode / all_words extraction). mode: "annotation" |
     "spontaneous" — decides prompt framing and whether the anchor/example
     fields are sourced from the note itself instead of the AI (see
-    CLAUDE.md § Card fields / § Word sources).
-    on_word_done(word, success), if given, fires once per word actually
-    iterated — success=False on the two AI-failure/empty-items skip paths
-    below (so a caller can exclude the word from its own "confirmed" state,
-    same retry-next-run guarantee _generate_loop already gives the cards
-    table itself), success=True otherwise, including when every item for
-    that word turned out to be a card_exists() duplicate — used by the
-    markdown_notes per-file baseline (_build_markdown_pending /
-    _commit_markdown_file_state)."""
+    CLAUDE.md § Card fields / § Word sources)."""
     processed_count  = 0
-    card_fields      = load_card_fields()
-    enabled          = _enabled_keys(card_fields)
-    target_mode      = "cloze" if _cloze_active(card_fields) else "standard"
-    example_field    = next(f for f in card_fields if f['field'] == 'text_example_phrase')
-    strip_for_typing = example_field['enabled'] and example_field['interaction'] == 'type_in'
+    if mode == "annotation":
+        enabled          = {"word", "text_example_phrase", "text_meaning"}
+        if getattr(config, "ANNOTATION_INCLUDE_AUDIO", True):
+            enabled.add("audio_word")
+        # "image" is never added — Annotation Mode never has a GIF (see
+        # CLAUDE.md § Annotation Mode content presets).
+        target_mode      = "annotation_cloze" if _effective_annotation_card_type() == "cloze" else "annotation"
+        # Annotation Mode's "type_in" card type tests Word, never
+        # Text_Example_Phrase (see _build_annotation_model()) — cloze
+        # stripping happens independently inside build_notes(), same as
+        # Spontaneous Mode's cloze path — so this is always correct.
+        strip_for_typing = False
+    else:
+        card_fields      = load_card_fields()
+        enabled          = _enabled_keys(card_fields)
+        target_mode      = "cloze" if _cloze_active(card_fields) else "standard"
+        example_field    = next(f for f in card_fields if f['field'] == 'text_example_phrase')
+        strip_for_typing = example_field['enabled'] and example_field['interaction'] == 'type_in'
     known_categories = get_known_categories(conn) if config.ENABLE_CATEGORIES else []
 
     for anchor, context in pending:
@@ -2598,8 +2789,6 @@ def _generate_loop(conn, pending, limit, mode, on_word_done=None):
             # (rate limit, timeout, bad JSON) into a silently lost word
             # forever. Leaving it unsaved means it's just picked up again.
             print(col('    [WARN] AI failed — skipping (will retry next run)', 'yellow'))
-            if on_word_done:
-                on_word_done(anchor, False)
             processed_count += 1
             continue
 
@@ -2608,8 +2797,6 @@ def _generate_loop(conn, pending, limit, mode, on_word_done=None):
 
         if not items:
             print(col('    [WARN] No content returned — skipping', 'yellow'))
-            if on_word_done:
-                on_word_done(anchor, False)
             processed_count += 1
             continue
 
@@ -2624,7 +2811,11 @@ def _generate_loop(conn, pending, limit, mode, on_word_done=None):
 
         for meaning_id, item in enumerate(items):
             content_key, source_phrase = _content_key(mode, anchor, context)
-            if card_exists(conn, target_mode, content_key, meaning_id):
+            # Annotation Mode has no dedup at all by design (see CLAUDE.md
+            # § Word sources) — content_key is always unique there, so
+            # this check would never fire; skipped outright rather than
+            # spending a query on a check that can't match.
+            if mode != "annotation" and card_exists(conn, target_mode, content_key, meaning_id):
                 print(col(f'    [SKIP] Item {meaning_id} already in DB', 'dim'))
                 continue
 
@@ -2709,8 +2900,6 @@ def _generate_loop(conn, pending, limit, mode, on_word_done=None):
             cat_suffix = col(f'  [{category}]', 'cyan') if category else ''
             print(col(f'    [DONE] [{word_label}] {text_meaning[:60]}...', 'green') + cat_suffix)
 
-        if on_word_done:
-            on_word_done(anchor, True)
         processed_count += 1
 
     print(col(f'\n  {processed_count} words processed this run.', 'green', 'bold'))
@@ -2837,9 +3026,9 @@ def _run_headless():
     mode          = "annotation" if markdown_mode else "spontaneous"
 
     if markdown_mode:
-        pending, item_sources, file_snapshot = _build_markdown_pending(conn, "annotation")
-        print(f"\n  Files scanned : {len(file_snapshot)}")
-        print(f"  New items     : {len(pending)}")
+        pending, files_scanned = _build_markdown_pending(conn, "annotation")
+        print(f"\n  Files scanned    : {files_scanned}")
+        print(f"  Highlights found : {len(pending)}")
     else:
         all_words = get_word_pool()
         processed = get_processed_words(conn, target_mode)
@@ -2847,22 +3036,24 @@ def _run_headless():
         print(f"\n  Word pool   : {len(all_words)}")
         print(f"  In database : {len(processed)}")
         print(f"  Pending     : {len(pending)}")
-    print(f"  This run    : up to {config.WORDS_PER_RUN} words\n")
+    if markdown_mode:
+        print(f"  This run         : all {len(pending)} highlights\n")
+    else:
+        print(f"  This run    : up to {config.WORDS_PER_RUN} words\n")
 
     changes_before = conn.total_changes
 
     if not pending:
         if markdown_mode:
-            print("[INFO] No new content found in tracked files.")
+            print("[INFO] No highlights found in tracked files.")
         else:
             print("[WARN] Word pool exhausted!")
             print(f"   Increase TOTAL_WORD_POOL in config.py "
                   f"(currently {config.TOTAL_WORD_POOL}) and run again.")
     elif markdown_mode:
-        confirmed_words = set()
-        _generate_loop(conn, pending, config.WORDS_PER_RUN, mode,
-                        on_word_done=lambda w, ok: confirmed_words.add(w) if ok else None)
-        _commit_markdown_file_state(conn, "annotation", file_snapshot, item_sources, confirmed_words)
+        # See _do_generate()'s matching comment — no WORDS_PER_RUN cap for
+        # Annotation Mode, every highlight found this run is processed.
+        _generate_loop(conn, pending, len(pending), mode)
     else:
         _generate_loop(conn, pending, config.WORDS_PER_RUN, mode)
 
@@ -2890,8 +3081,7 @@ def _mode_main_menu(conn, mode):
     _tui.run_menu(f'Main Menu — {label}', [
         _tui.Action('Generate new cards',
                     lambda: run_generate_wizard(conn),
-                    'Choose fields, then generate + export automatically',
-                    print_mode=True),
+                    'Configure content, then generate + export automatically'),
         _tui.Action('Export decks',
                     lambda: run_export(conn),
                     'Rebuild a full backup .apkg under a chosen filename',

@@ -146,17 +146,43 @@ CARD_TEMPLATE = "dark"
 
 
 # ─────────────────────────────────────────────────────────────
-#  CARD FIELDS
+#  CARD FIELDS — Spontaneous Mode only
 #  Which fields appear on the card, and how — set via Generate new cards'
-#  field checklist (Main Menu -> Generate new cards -> pick a mode ->
-#  choose fields), not meant to be hand-edited here. A JSON array, one
-#  entry per field: {"field", "enabled", "position" ("front"/"back"),
-#  "order" (sort key within that side), "interaction"
-#  ("reveal"/"type_in"/"cloze" — "cloze" only valid for
-#  text_example_phrase)}. See CLAUDE.md § Card fields.
+#  field checklist (Main Menu -> Generate new cards -> choose fields),
+#  not meant to be hand-edited here. A JSON array, one entry per field:
+#  {"field", "enabled", "position" ("front"/"back"), "order" (sort key
+#  within that side), "interaction" ("reveal"/"type_in"/"cloze" — "cloze"
+#  only valid for text_example_phrase)}. See CLAUDE.md § Card fields.
+#  Annotation Mode ignores this entirely — it uses ANNOTATION_INCLUDE_AUDIO /
+#  ANNOTATION_CARD_TYPE below instead.
 # ─────────────────────────────────────────────────────────────
 
 CARD_FIELDS_JSON = '[{"field": "word", "enabled": true, "position": "front", "order": 0, "interaction": "reveal"}, {"field": "gender", "enabled": true, "position": "front", "order": 1, "interaction": "reveal"}, {"field": "ipa", "enabled": true, "position": "front", "order": 2, "interaction": "reveal"}, {"field": "audio_word", "enabled": true, "position": "front", "order": 3, "interaction": "reveal"}, {"field": "image", "enabled": true, "position": "front", "order": 4, "interaction": "reveal"}, {"field": "text_example_phrase", "enabled": true, "position": "front", "order": 5, "interaction": "reveal"}, {"field": "text_example_translation", "enabled": true, "position": "front", "order": 6, "interaction": "reveal"}, {"field": "audio_example", "enabled": true, "position": "front", "order": 7, "interaction": "reveal"}, {"field": "text_meaning", "enabled": true, "position": "back", "order": 0, "interaction": "reveal"}, {"field": "audio_meaning", "enabled": true, "position": "back", "order": 1, "interaction": "reveal"}, {"field": "synonyms", "enabled": true, "position": "back", "order": 2, "interaction": "reveal"}]'
+
+
+# ─────────────────────────────────────────────────────────────
+#  ANNOTATION MODE CONTENT — Annotation Mode only
+#  Set via Generate new cards' content picker (Main Menu -> Generate new
+#  cards -> choose content & card type), not meant to be hand-edited here.
+#  Annotation Mode's card is deliberately minimal: the highlighted
+#  phrase/word (in its sentence, when available) on the front, its
+#  translation on the back — nothing else. No image, ever. See CLAUDE.md
+#  § Annotation Mode content presets.
+#
+#  ANNOTATION_INCLUDE_AUDIO — whether word-pronunciation audio is
+#  generated and included on the card, alongside the always-on
+#  phrase/word + translation.
+#
+#  ANNOTATION_CARD_TYPE — how the card tests you:
+#    "basic"   — reveal the translation (default)
+#    "type_in" — type the phrase/word to flip the card
+#    "cloze"   — blank the phrase/word within its sentence (only offered/
+#                meaningful when MARKDOWN_EXTRACTION_MODE = "highlights";
+#                silently treated as "basic" otherwise)
+# ─────────────────────────────────────────────────────────────
+
+ANNOTATION_INCLUDE_AUDIO = True
+ANNOTATION_CARD_TYPE     = "basic"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -170,6 +196,9 @@ CARD_FIELDS_JSON = '[{"field": "word", "enabled": true, "position": "front", "or
 #  new ones are only introduced when a meaning doesn't fit an existing one,
 #  and existing categories already in progress.db are reused by name.
 #  Set to False to disable — cards then only ever go in the root deck.
+#  Annotation Mode never files cards into a subdeck regardless of this
+#  setting — only the topic:: tag applies there (see CLAUDE.md
+#  § Category / subdeck organization).
 # ─────────────────────────────────────────────────────────────
 
 ENABLE_CATEGORIES = True
